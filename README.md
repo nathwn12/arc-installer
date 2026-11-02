@@ -4,7 +4,7 @@
 
 # ArcInstaller
 
-Applies the ARC icon theme to Windows, and restores the stock icons on revert. Built for admins on 64-bit Windows 10 or 11.
+Applies the ARC icon theme to your Windows, and restores the stock icons on revert. Built for admins on 64-bit Windows 10 or 11.
 
 ## Install
 
@@ -48,6 +48,8 @@ powershell -File .\verify.ps1
 
 Read-only host check: compares live SystemResources files against recorded hashes, exits 0 on PASS and 1 on FAIL.
 
-## License
+## Links
 
-MIT — see [LICENSE](LICENSE).
+- [Repair manual](docs/REPAIR-MANUAL.md)
+- [Install map](docs/WHERE-IT-LIVES.md)
+- [MIT](LICENSE)
