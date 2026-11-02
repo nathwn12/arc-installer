@@ -9,7 +9,7 @@
 There is no released installer yet, so you build the app from source. You need Windows 10 or 11 (x64) with admin rights:
 
 ```powershell
-git clone https://github.com/nathwn12/ArcInstaller.git
+git clone https://github.com/nathwn12/arc-installer.git
 cd ArcInstaller
 pwsh -File .\fetch-theme.ps1
 powershell -File .\build.ps1
@@ -75,7 +75,7 @@ You add `-Yes` to skip confirmations. You add `-DryRun` to preview an apply or r
 
 ## Links
 
-- [Source and issue tracker](https://github.com/nathwn12/ArcInstaller)
+- [Source and issue tracker](https://github.com/nathwn12/arc-installer)
 - [Repair manual](docs/REPAIR-MANUAL.md)
 - [Where it lives](docs/WHERE-IT-LIVES.md)
 - [Upstream icon packs](https://github.com/niivu/resource-redirect-icon-themes)
