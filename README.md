@@ -1,8 +1,10 @@
 <p align="center">
   <img src="icon/ArcInstaller.ico" width="120" height="120" alt="ArcInstaller icon" />
 </p>
-<h1 align="center">ArcInstaller</h1>
-<p align="center"><strong>Get the ARC icon theme on your Windows desktop, and put the stock icons back whenever you want.</strong></p>
+
+# ArcInstaller
+
+Get the ARC icon theme on your Windows desktop, and put the stock icons back whenever you want.
 
 ## Install
 
@@ -17,7 +19,7 @@ powershell -File .\build.ps1
 
 The fetch step downloads the icon packs from upstream and checks every archive against a pinned SHA-256. The build step compiles `dist\ArcInstaller.exe`. The app replaces three icon payloads in the Windows SystemResources folder with merged copies that keep every stock resource, and it backs up your originals before the first write so revert works.
 
-## Use it
+## Usage
 
 Run `dist\ArcInstaller.exe`, pick a variant in the dropdown, and press Apply. Repair re-applies the theme when a payload drifts, Revert puts your originals back, and Refresh clears the icon cache. The same actions work from a command line:
 
@@ -29,7 +31,7 @@ Run `dist\ArcInstaller.exe`, pick a variant in the dropdown, and press Apply. Re
 
 Four variants ship in the one exe: ARC, Arc Neutral Brown, Arc Neutral Grey, and Arc Dark Grey. Switching variants re-merges, restores the originals, and applies in one step.
 
-## What you get
+## What it does
 
 - One window that applies, repairs, reverts, and refreshes the ARC icon theme.
 - Four ARC variants in a single self-contained exe with nothing to install first.
@@ -73,18 +75,14 @@ You add `-Yes` to skip confirmations. You add `-DryRun` to preview an apply or r
 - PowerShell 7 for the fetch step; the build step runs under Windows PowerShell 5.1.
 - Network access at build time: the icon packs download from upstream, SHA-256 verified, and are never redistributed here.
 
-## Links
+## Development
 
-- [Source and issue tracker](https://github.com/nathwn12/arc-installer)
-- [Repair manual](docs/REPAIR-MANUAL.md)
-- [Where it lives](docs/WHERE-IT-LIVES.md)
-- [Upstream icon packs](https://github.com/niivu/resource-redirect-icon-themes)
-- [License (MIT)](LICENSE)
+```powershell
+powershell -File .\verify.ps1
+```
 
-<!-- nathwn12 house footer: identical in every repo. Do not edit. -->
-<p align="center">
-  <a href="https://github.com/nathwn12"><img src="assets/signature.svg" width="96" alt="nathwn12" /></a>
-</p>
-<p align="center">
-  <sub>Built by <a href="https://github.com/nathwn12">nathwn12</a> · <a href="https://github.com/nathwn12?tab=repositories">All projects</a></sub>
-</p>
+Read-only: compares live SystemResources files against recorded hashes, exits 0 on PASS and 1 on FAIL. Repair manual: [docs/REPAIR-MANUAL.md](docs/REPAIR-MANUAL.md). Where it lives: [docs/WHERE-IT-LIVES.md](docs/WHERE-IT-LIVES.md). Upstream icon packs: https://github.com/niivu/resource-redirect-icon-themes.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
