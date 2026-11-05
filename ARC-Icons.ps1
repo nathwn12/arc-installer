@@ -51,7 +51,7 @@
 param(
     [ValidateSet('menu', 'apply', 'revert', 'repair', 'status', 'refresh', 'merge', 'task-on', 'task-off')]
     [string]$Action = 'menu',
-    [string]$Variant = 'arc',
+    [string]$Variant = 'dark-grey',
     [switch]$Yes,
     [switch]$DryRun
 )
@@ -74,6 +74,7 @@ $SysDir = Join-Path $env:SystemRoot 'SystemResources'
 # Shared library (dot-source only, no side effects): owns the icon-cache refresh,
 # the verified explorer restart and the shell guard used on every exit path.
 . (Join-Path $Bin 'Set-BaselineSecurity.ps1')
+. (Join-Path $Bin 'Default-IconVariant.ps1')
 
 # Nested calls run on PowerShell 7 when present, else Windows PowerShell 5.1 —
 # no hard dependence on pwsh.exe being installed or on PATH.
@@ -246,7 +247,7 @@ function Invoke-Apply {
         Write-Host '  fresh machine: capture pristine originals -> merge -> apply -> verify (no restore: nothing installed yet).'
         if ($DryRun) { Write-Host '  -DryRun: a first install must write (capture + merge), so there is no preview; nothing changed.'; return }
         if (-not (Confirm ("Install '$($v.Display)' now?"))) { Write-Host '  cancelled'; return }
-        $a = @('-NoProfile', '-File', $Apply, '-Root', $Root, '-SystemResourceDir', $SysDir, '-CloseHolders', '-Variant', $v.Id)
+        $a = @('-NoProfile', '-File', $Apply, '-Root', $Root, '-SystemResourceDir', $SysDir, '-CloseHolders') + (Get-ArcIconsApplyVariantArguments $v.Id)
         & $PSExe @a
         if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-APPLY: FAILED (exit {0}) - see the output above." -f $LASTEXITCODE) $LASTEXITCODE 'the shell was restored; live files are rolled back to the pristine originals.' }
         return
@@ -272,7 +273,7 @@ function Invoke-Apply {
     }
     Write-Host ("  target : {0}\{{imageres,imagesp1,zipfldr}}.dll.mun" -f $SysDir)
     if (-not (Confirm 'Apply now?')) { Write-Host '  cancelled'; return }
-    $a = @('-NoProfile', '-File', $Apply, '-Root', $Root, '-SystemResourceDir', $SysDir, '-CloseHolders')
+    $a = @('-NoProfile', '-File', $Apply, '-Root', $Root, '-SystemResourceDir', $SysDir, '-CloseHolders') + (Get-ArcIconsApplyVariantArguments $v.Id)
     if ($DryRun) { $a += '-DryRun' }
     & $PSExe @a
     if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-APPLY: FAILED (exit {0}) - see the output above." -f $LASTEXITCODE) $LASTEXITCODE 'the shell was restored; live files are rolled back to the pristine originals.' }
@@ -392,6 +393,7 @@ function Show-Menu {
 }
 
 # ---- entry ----
+$Variant = Get-ArcIconsDefaultVariant $Variant $PSBoundParameters.ContainsKey('Variant') (Get-BuiltTheme)
 $script:VariantInfo = Resolve-Variant $Variant   # fail on an unknown variant before any elevation prompt
 
 if (-not (Test-Admin)) {

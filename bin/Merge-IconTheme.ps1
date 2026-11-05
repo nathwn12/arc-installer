@@ -615,6 +615,48 @@ foreach ($r in $results) {
     }
 }
 
+# ---- pair-only rebuild: the manifest keeps all THREE rows, never drops rows ----
+# A -Pair build writes ONE stage file, but installed-manifest.json is the record
+# of all three files. Folding the rebuilt row into the existing manifest is only
+# sound when every UNTOUCHED row still matches its stage file on disk: otherwise
+# the build is stale and apply.ps1 would refuse that pair at preflight - so throw
+# instead of writing a manifest that claims a state the disk does not have.
+$mfPath = Join-Path $Root 'installed-manifest.json'
+$existingMan = $null
+if ($Pair) {
+    if (-not (Test-Path -LiteralPath $mfPath -PathType Leaf)) {
+        throw ("-Pair '{0}' needs an existing installed-manifest.json (three rows); run a full -Build first." -f $Pair)
+    }
+    $existingMan = Get-Content -LiteralPath $mfPath -Raw | ConvertFrom-Json
+    $existingFiles = @($existingMan.files)
+    if ($existingFiles.Count -ne 3) {
+        throw ("-Pair '{0}': existing installed-manifest.json carries {1} row(s), expected 3; run a full -Build." -f $Pair, $existingFiles.Count)
+    }
+    if ([string]$existingMan.variantId -ne $VariantInfo.Id) {
+        throw ("-Pair '{0}': existing manifest is variant '{1}', this build is '{2}'; a pair-only rebuild cannot mix variants - run a full -Build -Variant {2}." -f $Pair, [string]$existingMan.variantId, $VariantInfo.Id)
+    }
+    $rebuiltRows = @{}
+    foreach ($f in $files) { $rebuiltRows[[string]$f.name] = $f }
+    $mergedRows = @()
+    foreach ($row in $existingFiles) {
+        $nm = [string]$row.name
+        if ($rebuiltRows.ContainsKey($nm)) { $mergedRows += $rebuiltRows[$nm]; [void]$rebuiltRows.Remove($nm); continue }
+        $st = Join-Path $Root ([string]$row.stagePath)
+        if (-not (Test-Path -LiteralPath $st -PathType Leaf)) {
+            throw ("-Pair '{0}': untouched row '{1}' has no stage file ({2}); run a full -Build." -f $Pair, $nm, [string]$row.stagePath)
+        }
+        $h = (Get-FileHash -LiteralPath $st -Algorithm SHA256).Hash
+        if ($h -ne ([string]$row.mergedSha256)) {
+            throw ("-Pair '{0}': untouched row '{1}' stage hash {2} != recorded merged {3}; the build is stale - run a full -Build." -f $Pair, $nm, $h, [string]$row.mergedSha256)
+        }
+        $mergedRows += $row
+        Write-Output ("KEEP {0}: untouched, stage hash matches recorded merged" -f $nm)
+    }
+    foreach ($k in @($rebuiltRows.Keys)) { $mergedRows += $rebuiltRows[$k] }
+    if ($mergedRows.Count -ne 3) { throw ("-Pair '{0}': merged manifest would carry {1} rows, expected 3." -f $Pair, $mergedRows.Count) }
+    $files = $mergedRows
+}
+
 # ---- sourceOrigin: the applied theme's provenance is never blank ----
 # Always: the variant source dir + a sha256 of every theme file this build
 # consumed (so the exact payload can be re-fetched and re-checked). The landed
@@ -648,6 +690,16 @@ $manifest = [ordered]@{
     session       = 'arcinstaller'
     generated     = (Get-Date -Format 'o')
     files         = $files
+}
+if ($existingMan) {
+    # Pair-only rebuild: the header (theme + variant + sourceOrigin) describes the
+    # payload the UNTOUCHED rows came from. Keep it rather than claim this
+    # one-pair rebuild re-verified provenance it never read.
+    $manifest.theme = [string]$existingMan.theme
+    $manifest.variantId = [string]$existingMan.variantId
+    $manifest.variantSource = [string]$existingMan.variantSource
+    $manifest.sourceOrigin = $existingMan.sourceOrigin
+    Write-Output 'WARN pair-only rebuild: manifest header + sourceOrigin kept from the existing build (untouched rows not re-provenanced)'
 }
 $mfPath = Join-Path $Root 'installed-manifest.json'
 ($manifest | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $mfPath -Encoding utf8

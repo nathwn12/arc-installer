@@ -52,7 +52,7 @@ param(
   [switch]$SkipIconCacheRefresh,
   [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
   [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),
-  [string]$Variant = 'arc',
+  [string]$Variant = 'dark-grey',
   [switch]$Yes,
   [switch]$NoLock
 )

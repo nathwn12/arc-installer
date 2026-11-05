@@ -26,6 +26,45 @@ function Test-ArcIconsPathInside([string]$Path, [string]$Dir) {
   return $p.StartsWith($d + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
+# Manifest-supplied paths are DATA, never trusted destinations. Refuse any
+# resolved path under a system-owned resource tree: the rebase writes only
+# inside -Root, so a manifest row can never aim a copy at SystemResources/WinSxS.
+function Assert-ArcIconsNoSystemResourceWrite([string]$FullPath, [string]$Label) {
+  $c = [IO.Path]::GetFullPath($FullPath)
+  $guarded = @()
+  if ($env:SystemRoot) {
+    $guarded += (Resolve-ArcIconsCanonicalPath (Join-Path $env:SystemRoot 'SystemResources'))
+    $guarded += (Resolve-ArcIconsCanonicalPath (Join-Path $env:SystemRoot 'WinSxS'))
+  }
+  foreach ($g in $guarded) {
+    if (Test-ArcIconsPathInside $c $g) {
+      throw ("refused {0} '{1}': resolves inside the system-owned directory {2}; the rebase writes only under -Root." -f $Label, $FullPath, $g)
+    }
+  }
+}
+
+# Canonicalize a RELATIVE child of -Root and enforce confinement: reject
+# rooted/UNC values, reject anything that resolves outside -Root or onto -Root
+# itself, and reject system-resource destinations. Every rebase write target is
+# produced here, whether the value came from a manifest row or was derived.
+function Resolve-ArcIconsRootChildPath([string]$RootC, [string]$Relative, [string]$Label) {
+  $rel = ([string]$Relative).Trim()
+  if (-not $rel) { throw ("refused {0}: empty path; a manifest row must name a path under -Root." -f $Label) }
+  if ([IO.Path]::IsPathRooted($rel) -or $rel.StartsWith('\\') -or ($rel -match '^[A-Za-z]:')) {
+    throw ("refused {0} '{1}': must be relative to -Root, not absolute or UNC." -f $Label, $Relative)
+  }
+  $root = ([IO.Path]::GetFullPath($RootC)).TrimEnd('\')
+  $full = [IO.Path]::GetFullPath((Join-Path $root $rel))
+  if (-not (Test-ArcIconsPathInside $full $root)) {
+    throw ("refused {0} '{1}': resolves to '{2}', which escapes -Root '{3}'." -f $Label, $Relative, $full, $root)
+  }
+  if ($full.TrimEnd('\') -ieq $root) {
+    throw ("refused {0} '{1}': resolves to -Root itself, not a path under it." -f $Label, $Relative)
+  }
+  Assert-ArcIconsNoSystemResourceWrite $full $Label
+  return $full
+}
+
 function Test-ArcIconsAllowedName([string]$Name) {
   if (-not $Name) { return $false }
   if ([IO.Path]::GetFileName($Name) -ne $Name) { return $false }
@@ -33,7 +72,11 @@ function Test-ArcIconsAllowedName([string]$Name) {
   return $allowed -contains $Name.ToUpperInvariant()
 }
 
-function Assert-ArcIconsOriginalsManifest($Manifest) {
+# Count + unique-name + bare-allowlisted-basename checks always run. When the
+# caller passes -RootC, every row's write paths are ALSO canonicalized and
+# confined to that root (originalPath must name the row's own file), so a
+# manifest cannot redirect a rebase copy outside -Root.
+function Assert-ArcIconsOriginalsManifest($Manifest, [string]$RootC = '') {
   $files = @()
   if ($Manifest.files) { $files = @($Manifest.files) }
   if ($files.Count -ne 3) {
@@ -47,6 +90,18 @@ function Assert-ArcIconsOriginalsManifest($Manifest) {
   foreach ($n in $names) {
     if (-not (Test-ArcIconsAllowedName $n)) {
       throw "refused manifest name '$n': not a bare allowlisted basename {imageres.dll.mun, imagesp1.dll.mun, zipfldr.dll.mun}. -Force cannot bypass."
+    }
+  }
+  if ($RootC) {
+    $root = ([IO.Path]::GetFullPath($RootC)).TrimEnd('\')
+    foreach ($f in $files) {
+      $nm = [string]$f.name
+      $op = Resolve-ArcIconsRootChildPath $root ([string]$f.originalPath) ("{0}: originalPath" -f $nm)
+      if ([IO.Path]::GetFileName($op) -ine $nm) {
+        throw ("refused manifest row '{0}': originalPath '{1}' does not name that file. -Force cannot bypass." -f $nm, [string]$f.originalPath)
+      }
+      [void](Resolve-ArcIconsRootChildPath $root ([string]$f.aclFile) ("{0}: aclFile" -f $nm))
+      [void](Resolve-ArcIconsRootChildPath $root ([string]$f.stagePath) ("{0}: stagePath" -f $nm))
     }
   }
 }
@@ -174,6 +229,268 @@ function Invoke-ArcIconsOriginalsCapture([string]$RootC, [string]$SysC, $Variant
   }
   [IO.File]::WriteAllText((Join-Path $origDir 'manifest.json'), ($man | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
   Write-Output ("ARC-ICONS-CAPTURE: OK originals\manifest.json (3 files, theme '{0}')" -f $VariantInfo.Display)
+}
+
+# Single-file original rebase (measured 2026-10-30). A Windows component
+# update replaces a live .mun with a NEW WinSxS build: live is hardlinked to the
+# new component, owner is TrustedInstaller again, and the recorded original is
+# stale. apply.ps1 then refuses ("live hash is neither recorded original nor
+# recorded merged") and -Force would paper over a real baseline change. The
+# rebase adopts the CURRENT LIVE file as the pristine original for ONE name,
+# archiving the superseded original + its acl sidecar + the old row so the
+# previous baseline stays recoverable. Nothing outside $RootC is written.
+#
+# Gates (all refuse, never -Force-overridable):
+#   - $Name must be an allowlisted bare basename and have a row in the manifest;
+#   - every manifest write path must canonicalize INSIDE -Root (no rooted/UNC
+#     value, no .. escape, never SystemResources/WinSxS);
+#   - live must exist and hash EXACTLY to -ExpectLiveHash (caller-supplied);
+#   - live must NOT equal the recorded merged hash (that means our install is
+#     live, not an updated OS baseline: restore pristine first);
+#   - live == recorded original -> ALREADY-REBASED (no-op, verified consistent);
+#   - the live file must be hardlinked to a WinSxS component whose directory
+#     name parses as <arch>_<name>_<pubkey>_<version>_<culture>_<hash>
+#     (strict attribution; an unattributed or non-WinSxS sibling fails closed).
+# Caller must hold read access to live; no privilege is enabled here.
+#
+# ORDER: the validation below is read-only and is what -DryRun reports. The
+# commit path acquires logs\ArcIcons.lock FIRST and then runs this same
+# validation again under the lock, so the hashes/manifest/attribution that
+# justify the write are read while the lock is held - a concurrent
+# apply/restore cannot slide between the check and the commit.
+
+# Parse WinSxS component packaging from a hardlink sibling path:
+#   <arch>_<name>_<publicKeyToken>_<a.b.c.d>_<culture>_<hash>
+# Returns @{Name, Version} or $null (caller fails closed).
+function Get-ArcIconsWinSxSComponent([string]$Sibling) {
+  $leaf = Split-Path -Leaf (Split-Path -Parent ([string]$Sibling))
+  if (-not $leaf) { return $null }
+  if ($leaf -notmatch '^[A-Za-z0-9]+_.+_[0-9A-Fa-f]{16}_(\d+\.\d+\.\d+\.\d+)_[A-Za-z0-9-]+_[0-9A-Fa-f]{16}$') { return $null }
+  return [pscustomobject]@{ Name = $leaf; Version = $Matches[1] }
+}
+
+# One read-only validation pass: every gate plus every value the commit needs.
+# Called by the dry-run path (no lock, no writes) and again by the commit path
+# AFTER the lock is held.
+function Get-ArcIconsRebasePlan {
+  param(
+    [string]$RootC,
+    [string]$SysC,
+    [string]$Name,
+    [string]$ExpectLiveHash,
+    [string]$BaseVersion = ''
+  )
+  $rootFull = ([IO.Path]::GetFullPath($RootC)).TrimEnd('\')
+  $sysFull = ([IO.Path]::GetFullPath($SysC)).TrimEnd('\')
+  if (Test-ArcIconsPathInside $rootFull $sysFull) {
+    throw ("refused -Root '{0}': it is inside -SystemResourceDir '{1}'; the rebase never writes system-owned paths." -f $rootFull, $sysFull)
+  }
+  Assert-ArcIconsNoSystemResourceWrite $rootFull '-Root'
+  $manPath = Join-Path $rootFull 'originals\manifest.json'
+  if (-not (Test-Path -LiteralPath $manPath -PathType Leaf)) { throw ("originals manifest missing: {0}" -f $manPath) }
+  $man = Read-ArcIconsJsonFile $manPath
+  Assert-ArcIconsOriginalsManifest $man $rootFull
+  $row = @($man.files | Where-Object { ([string]$_.name) -ieq $Name })[0]
+  if ($null -eq $row) { throw ("{0}: no row in originals\manifest.json." -f $Name) }
+  $canonName = [string]$row.name
+  $live = Resolve-ArcIconsCanonicalPath (Join-Path $sysFull $canonName)
+  if (-not (Test-ArcIconsPathInside $live $sysFull)) { throw ("{0}: live path escapes -SystemResourceDir." -f $canonName) }
+  if (-not (Test-Path -LiteralPath $live -PathType Leaf)) { throw ("{0}: live file missing ({1}); nothing to rebase from." -f $canonName, $live) }
+
+  $expect = ([string]$ExpectLiveHash).Trim().ToUpperInvariant()
+  if (-not $expect) { throw ("{0}: -ExpectLiveHash is required (the exact live hash this rebase may adopt)." -f $canonName) }
+  $liveSha = Get-ArcIconsSha256 $live
+  if ($liveSha -ne $expect) {
+    throw ("{0}: live hash {1} != -ExpectLiveHash {2}; live moved since the hash was read - re-read it and retry." -f $canonName, $liveSha, $expect)
+  }
+
+  $mergedSha = ''
+  $instPath = Join-Path $rootFull 'installed-manifest.json'
+  if (Test-Path -LiteralPath $instPath -PathType Leaf) {
+    $inst = Read-ArcIconsJsonFile $instPath
+    $irow = @($inst.files | Where-Object { ([string]$_.name) -ieq $canonName })[0]
+    if ($null -ne $irow) { $mergedSha = ([string]$irow.mergedSha256).ToUpperInvariant() }
+  }
+  if ($mergedSha -and ($liveSha -eq $mergedSha)) {
+    throw ("{0}: live hash {1} IS the recorded merged hash - our install is live, not an updated OS baseline. Run restore/apply first; rebasing would adopt a themed file as pristine." -f $canonName, $liveSha)
+  }
+
+  $oldSha = ([string]$row.originalSha256).ToUpperInvariant()
+  $oldFile = Resolve-ArcIconsRootChildPath $rootFull ([string]$row.originalPath) ("{0}: originalPath" -f $canonName)
+  $aclPath = Resolve-ArcIconsRootChildPath $rootFull ([string]$row.aclFile) ("{0}: aclFile" -f $canonName)
+  if ($liveSha -eq $oldSha) {
+    if (-not (Test-Path -LiteralPath $oldFile -PathType Leaf)) { throw ("{0}: live already equals the recorded original but the pristine backup is missing ({1}); re-run the capture/restore path." -f $canonName, [string]$row.originalPath) }
+    $backupSha = Get-ArcIconsSha256 $oldFile
+    if ($backupSha -ne $oldSha) {
+      throw ("{0}: live == recorded original {1} but {2} hashes {3}; the manifest and originals disagree - repair before rebasing." -f $canonName, $oldSha, [string]$row.originalPath, $backupSha)
+    }
+    return [pscustomobject]@{ Status = 'already-rebased'; Name = $canonName; Live = $live; LiveSha = $liveSha; OldSha = $oldSha; MergedSha = $mergedSha; Sibling = ''; Component = ''; BaseVersion = ''; SupersededRel = ''; SupersededDir = ''; Plan = @() }
+  }
+
+  if (-not (Test-Path -LiteralPath $oldFile -PathType Leaf)) { throw ("{0}: pristine backup missing ({1}); cannot archive the superseded original." -f $canonName, [string]$row.originalPath) }
+  $backupSha = Get-ArcIconsSha256 $oldFile
+  if ($backupSha -ne $oldSha) {
+    throw ("{0}: pristine backup hash {1} != recorded original {2}; originals are inconsistent - repair before rebasing." -f $canonName, $backupSha, $oldSha)
+  }
+
+  $targets = @(Get-ArcIconsHardlinkTargets $live)
+  $sibling = Get-ArcIconsWinSxSSibling $live $targets
+  if (-not $sibling) {
+    throw ("{0}: no WinSxS hardlink sibling for {1} (fsutil returned {2} target(s)); cannot attribute the live file to an OS component - refusing to rebase from an unattributed file (a plain hardlink is not attribution)." -f $canonName, $live, $targets.Count)
+  }
+  if (-not (Test-Path -LiteralPath $sibling -PathType Leaf)) {
+    throw ("{0}: WinSxS hardlink sibling does not exist on disk: {1}; refusing." -f $canonName, $sibling)
+  }
+  $comp = Get-ArcIconsWinSxSComponent $sibling
+  if (-not $comp) {
+    throw ("{0}: WinSxS sibling is not a parseable component directory: {1}; cannot attribute the live file to a component version - refusing." -f $canonName, $sibling)
+  }
+  $component = $comp.Name
+  if (-not $BaseVersion) { $BaseVersion = $comp.Version }
+  if (-not $BaseVersion) {
+    try {
+      $cv = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+      $BaseVersion = ("{0}.{1}.{2}" -f $cv.CurrentMajorVersionNumber, $cv.CurrentBuild, $cv.UBR)
+    } catch { $BaseVersion = 'unknown' }
+  }
+
+  $size = (Get-Item -LiteralPath $live).Length
+  $owner = (Get-Acl -LiteralPath $live).Owner
+  $full = Get-ArcIconsFullSddl $live
+  $di = $full.IndexOf('D:')
+  if ($di -lt 0) { throw ("{0}: no DACL section in the live SDDL; cannot record a baseline ACL." -f $canonName) }
+  $daclSddl = $full.Substring($di)
+  if ($oldSha -notmatch '^[0-9A-F]{64}$') {
+    throw ("{0}: recorded original hash '{1}' is not a SHA-256 hex digest; refusing to derive the archive path from it." -f $canonName, [string]$row.originalSha256)
+  }
+  $supersededRel = 'originals\superseded\' + $oldSha
+  $supersededDir = Resolve-ArcIconsRootChildPath $rootFull $supersededRel ("{0}: superseded archive" -f $canonName)
+
+  $newRow = [ordered]@{
+    name           = $canonName
+    target         = [string]$row.target
+    originalPath   = [string]$row.originalPath
+    aclFile        = [string]$row.aclFile
+    originalSha256 = $liveSha
+    originalSize   = $size
+    owner          = $owner
+    sddl           = $full
+    stagePath      = [string]$row.stagePath
+    themeFile      = [string]$row.themeFile
+    capturedFrom   = ('live: ' + $live)
+    winSxSComponent = $component
+    baseVersion    = $BaseVersion
+    rebasedFrom    = $oldSha
+    rebasedAt      = (Get-Date).ToString('o')
+  }
+
+  $plan = @(
+    ("ARC-REBASE plan ({0})" -f $canonName)
+    ("  live      : {0}" -f $live)
+    ("  liveSha   : {0} (size {1}, owner {2})" -f $liveSha, $size, $owner)
+    ("  old orig  : {0} -> archive {1}" -f $oldSha, $supersededRel)
+    ("  merged    : {0}" -f $(if ($mergedSha) { $mergedSha + ' (live differs: OK)' } else { '<none recorded>' }))
+    ("  sibling   : {0}" -f $sibling)
+    ("  component : {0}  baseVersion {1}" -f $component, $BaseVersion)
+    ("  writes    : {0} (copy), {1} (sidecar), {2}\manifest.json (row rewrite), logs\rebase.journal.jsonl" -f [string]$row.originalPath, [string]$row.aclFile, 'originals')
+  )
+  return [pscustomobject]@{
+    Status = 'planned'; Name = $canonName; Live = $live; LiveSha = $liveSha; OldSha = $oldSha; MergedSha = $mergedSha
+    Sibling = $sibling; Component = $component; BaseVersion = $BaseVersion
+    SupersededRel = $supersededRel; SupersededDir = $supersededDir
+    OldFile = $oldFile; AclPath = $aclPath; ManPath = $manPath; Manifest = $man; Row = $row
+    Size = $size; Owner = $owner; Sddl = $full; DaclSddl = $daclSddl; NewRow = $newRow; Plan = $plan
+  }
+}
+
+# Shape the public result object. Status is 'already-rebased' (no-op),
+# 'planned' (dry run) or 'rebased' (committed).
+function New-ArcIconsRebaseResult($V, [string]$Status, [bool]$DryRun) {
+  $orig = $V.OldSha
+  if ($Status -eq 'rebased') { $orig = $V.LiveSha }
+  $sib = $V.Sibling; $comp = $V.Component; $ver = $V.BaseVersion; $sup = $V.SupersededRel; $plan = $V.Plan
+  if ($Status -eq 'already-rebased') { $sib = ''; $comp = ''; $ver = ''; $sup = ''; $plan = @() }
+  return [pscustomobject]@{
+    Name = $V.Name; Status = $Status; LiveSha = $V.LiveSha; OriginalSha = $orig; MergedSha = $V.MergedSha
+    Sibling = $sib; Component = $comp; BaseVersion = $ver; SupersededDir = $sup; DryRun = $DryRun; Plan = $plan
+  }
+}
+
+function Invoke-ArcIconsOriginalRebase {
+  param(
+    [string]$RootC,
+    [string]$SysC,
+    [string]$Name,
+    [string]$ExpectLiveHash,
+    [string]$BaseVersion = '',
+    [bool]$DryRun = $true,
+    [int]$LockTimeoutSec = 90
+  )
+  if (-not (Test-ArcIconsAllowedName $Name)) {
+    throw ("refused rebase name '{0}': not a bare allowlisted basename {imageres.dll.mun, imagesp1.dll.mun, zipfldr.dll.mun}." -f $Name)
+  }
+  $rootFull = ([IO.Path]::GetFullPath($RootC)).TrimEnd('\')
+  if ($DryRun) {
+    # Read-only preview: no lock file, no writes.
+    $v = Get-ArcIconsRebasePlan -RootC $rootFull -SysC $SysC -Name $Name -ExpectLiveHash $ExpectLiveHash -BaseVersion $BaseVersion
+    if ($v.Status -eq 'already-rebased') { return (New-ArcIconsRebaseResult $v 'already-rebased' $true) }
+    return (New-ArcIconsRebaseResult $v 'planned' $true)
+  }
+
+  $logDir = Join-Path $rootFull 'logs'
+  if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+  # Lock BEFORE validating: the commit reads every hash, row and destination
+  # again under the lock, so a concurrent apply/restore/match cannot move the
+  # live file or rewrite the manifest between the check and the write.
+  [void](Acquire-ArcIconsLock $logDir $LockTimeoutSec)
+  try {
+    $v = Get-ArcIconsRebasePlan -RootC $rootFull -SysC $SysC -Name $Name -ExpectLiveHash $ExpectLiveHash -BaseVersion $BaseVersion
+    if ($v.Status -eq 'already-rebased') { return (New-ArcIconsRebaseResult $v 'already-rebased' $false) }
+    $canonName = $v.Name
+    $live = $v.Live
+    $liveSha = $v.LiveSha
+    $oldSha = $v.OldSha
+    Write-ArcIconsJournal $logDir 'rebase.journal.jsonl' ([ordered]@{
+      ts = (Get-Date).ToString('o'); op = 'rebase-begin'; name = $canonName; from = $live; oldSha = $oldSha; newSha = $liveSha; superseded = $v.SupersededRel; component = $v.Component; baseVersion = $v.BaseVersion
+    })
+    if (-not (Test-Path -LiteralPath $v.SupersededDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $v.SupersededDir | Out-Null }
+    Copy-Item -Force -LiteralPath $v.OldFile -Destination (Join-Path $v.SupersededDir $canonName)
+    if (Test-Path -LiteralPath $v.AclPath -PathType Leaf) {
+      Copy-Item -Force -LiteralPath $v.AclPath -Destination (Join-Path $v.SupersededDir ($canonName + '.acl'))
+    }
+    $supRecord = [ordered]@{
+      supersededAt = (Get-Date).ToString('o')
+      reason       = 'Windows component update: live ' + $canonName + ' was hardlinked to ' + $v.Sibling
+      newSha256    = $liveSha
+      winSxSComponent = $v.Component
+      baseVersion  = $v.BaseVersion
+      row          = $v.Row
+    }
+    [IO.File]::WriteAllText((Join-Path $v.SupersededDir 'superseded.json'), ($supRecord | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
+
+    Copy-Item -Force -LiteralPath $live -Destination $v.OldFile
+    $copied = Get-ArcIconsSha256 $v.OldFile
+    if ($copied -ne $liveSha) { throw ("{0}: copied original hashes {1} != live {2}; manifest not rewritten." -f $canonName, $copied, $liveSha) }
+    $aclDir = Split-Path -Parent $v.AclPath
+    if (-not (Test-Path -LiteralPath $aclDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $aclDir | Out-Null }
+    [IO.File]::WriteAllText($v.AclPath, ($canonName + "`r`n" + $v.DaclSddl + "S:`r`n"), [Text.Encoding]::Unicode)
+
+    $files = @()
+    foreach ($f in $v.Manifest.files) {
+      if (([string]$f.name) -ieq $canonName) { $files += $v.NewRow } else { $files += $f }
+    }
+    $v.Manifest.files = $files
+    [IO.File]::WriteAllText($v.ManPath, ($v.Manifest | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
+    Write-ArcIconsJournal $logDir 'rebase.journal.jsonl' ([ordered]@{
+      ts = (Get-Date).ToString('o'); op = 'rebase-end'; name = $canonName; ok = $true; oldSha = $oldSha; newSha = $liveSha; superseded = $v.SupersededRel
+    })
+  } catch {
+    try { Write-ArcIconsJournal $logDir 'rebase.journal.jsonl' ([ordered]@{ ts = (Get-Date).ToString('o'); op = 'rebase-fail'; name = $Name; error = [string]$_ }) } catch { }
+    throw
+  } finally {
+    Release-ArcIconsLock $logDir
+  }
+  return (New-ArcIconsRebaseResult $v 'rebased' $false)
 }
 
 function Read-ArcIconsJsonFile([string]$Path) {
@@ -341,13 +658,16 @@ function Get-ArcIconsHardlinkTargets([string]$LiteralPath) {
   return @($out | Sort-Object -Unique)
 }
 
+# STRICT attribution: only a target inside a WinSxS component directory counts.
+# An ordinary hardlink (e.g. a user's own copy) is NOT evidence that the live
+# file came from an OS component, so it is never returned as a fallback.
 function Get-ArcIconsWinSxSSibling([string]$LiteralPath, [string[]]$Targets) {
   $canon = [IO.Path]::GetFullPath($LiteralPath)
   $others = @($Targets | Where-Object { $_ -ine $canon })
   if ($others.Count -eq 0) { return $null }
   $winsxs = @($others | Where-Object { $_ -like '*\WinSxS\*' })
-  if ($winsxs.Count -gt 0) { return $winsxs[0] }
-  return $others[0]
+  if ($winsxs.Count -eq 0) { return $null }
+  return $winsxs[0]
 }
 
 function Acquire-ArcIconsLock([string]$LogsDir, [int]$TimeoutSec = 90) {

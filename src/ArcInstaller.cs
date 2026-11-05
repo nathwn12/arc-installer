@@ -558,7 +558,7 @@ class MainForm : Form
     // first item. Read-only: the same manifest StatusText reads.
     private void PreselectInstalledVariant()
     {
-        int idx = 0;
+        int idx = 3;
         string vid = Program.InstalledVariantId(this.toolRoot);
         if (!string.IsNullOrEmpty(vid))
         {
