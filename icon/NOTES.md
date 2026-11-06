@@ -12,14 +12,19 @@ no system font glyph, no traced bitmap.
 
 ## 1. Concept
 
-**Primary: Candidate A — "four variants in one tile".**
+**Chosen mark — the 2×2 swatch tile.**
 A rounded app tile carrying a 2×2 grid of four flat grey swatches, stepped along the
 grey ladder from lightest (top-left) to darkest (bottom-right). The tile gives the
-icon an app-icon silhouette that reads at any size; the four swatches state the tool's
-whole job — four theme variants — and the light→dark ramp states that they are shades
-of one theme family rather than four unrelated things. A plate behind the swatches
-keeps the mark legible on *both* a light and a dark desktop, which a bare light-grey
-tile would not be.
+icon an app-icon silhouette that reads at any size, and the light→dark ramp states
+that the shades belong to one grey family rather than four unrelated things. The tile
+is the product identity, not a tally: **variant count does not appear in the art** —
+the tool ships four variants today and the mark reads the same if that number changes.
+A plate behind the swatches keeps the mark legible on *both* a light and a dark
+desktop, which a bare light-grey tile would not be.
+
+**One mark, three surfaces.** `assets/icon.svg` (the README hero), `ArcInstaller.ico`
+and the PNG renders are the same design at every size: the SVG geometry mirrors
+`src/IconForge.cs` `DrawGrid()` at N=512, so there is no second, drifting mark.
 
 ### The three candidates (drawn at 256px, in `candidates/`)
 

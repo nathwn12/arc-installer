@@ -1,6 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- nathwn12 house mark: rounded tile, one accent (Forge Amber), folder glyph. -->
-  <rect x="16" y="16" width="480" height="480" rx="112" fill="#0B0F14"/>
-  <path d="M112 224a32 32 0 0 1 32-32h80l40 48h96a32 32 0 0 1 32 32v80a32 32 0 0 1-32 32H144a32 32 0 0 1-32-32z" fill="#F5A524"/>
-  <rect x="160" y="288" width="96" height="48" rx="12" fill="#EEF3F6"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="ArcInstaller">
+  <!-- ArcInstaller mark: app tile carrying a 2x2 grey ladder.
+       Geometry mirrors icon/src/IconForge.cs DrawGrid() at N=512 so the SVG,
+       the .ico and the PNG renders are one design at every size.
+       Palette: plate #4E4E4E -> #404040, rim #A0A0A0 @130,
+       swatches #C0C0C0 #A8A8A8 #909090 #707070. No hue. -->
+  <defs>
+    <linearGradient id="plate" x1="35.84" y1="25.088" x2="476.16" y2="476.16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4E4E4E"/>
+      <stop offset="1" stop-color="#404040"/>
+    </linearGradient>
+  </defs>
+  <rect x="37.84" y="37.84" width="440.32" height="440.32" rx="96.87" ry="96.87" fill="#000000" opacity="0.05"/>
+  <rect x="35.84" y="35.84" width="440.32" height="440.32" rx="96.87" ry="96.87" fill="url(#plate)" stroke="#A0A0A0" stroke-opacity="0.51" stroke-width="5.63"/>
+  <rect x="74.24"  y="74.24"  width="167.68" height="167.68" rx="33.54" ry="33.54" fill="#C0C0C0"/>
+  <rect x="270.08" y="74.24"  width="167.68" height="167.68" rx="33.54" ry="33.54" fill="#A8A8A8"/>
+  <rect x="74.24"  y="270.08" width="167.68" height="167.68" rx="33.54" ry="33.54" fill="#909090"/>
+  <rect x="270.08" y="270.08" width="167.68" height="167.68" rx="33.54" ry="33.54" fill="#707070"/>
 </svg>
