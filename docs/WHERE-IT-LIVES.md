@@ -11,7 +11,8 @@ installed and no registry key is written.
 | `%ProgramData%\ArcIcons\theme` | The icon-theme variants, one directory per variant. |
 | `%ProgramData%\ArcIcons\state.json` | Live install state: `installed`, `original`, `partial` or `drifted`. |
 | `%ProgramData%\ArcIcons\installed-manifest.json` | Per-file record of what was merged, plus the variant's provenance. |
-| `%ProgramData%\ArcIcons\logs` | The apply and restore journals. |
+| `%ProgramData%\ArcIcons\logs` | The apply and restore journals, plus `refresh\` receipts written by the per-user icon-cache worker (one JSON per logged-on profile). |
+| `%ProgramData%\ArcIcons\bin` | Shared engines: `Set-BaselineSecurity.ps1` (privileges, SDDL, shell guard), `Merge-IconTheme.ps1`, `ArcIcons-UserRefresh.ps1` (session enumeration + cross-session transport) and `Refresh-UserIconCache.ps1` (the in-session worker). |
 
 ## The files it changes
 
@@ -27,11 +28,20 @@ not use the window:
 
 ```powershell
 pwsh -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action status
+pwsh -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action install -Variant dark-grey -Yes
+pwsh -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action uninstall -Yes
 pwsh -File "$env:ProgramData\ArcIcons\apply.ps1" -Variant dark-grey -Yes
 pwsh -File "$env:ProgramData\ArcIcons\verify.ps1"
 pwsh -File "$env:ProgramData\ArcIcons\restore.ps1"
 ```
 
-`apply.ps1` is THE one install command. `bin\Live-Install.ps1` and
+`ARC-Icons.ps1 -Action install` is the full one-action install (payload,
+per-user icon-cache refresh for every logged-on profile, verify PASS);
+`-Action uninstall` is the full one-action undo (add `-CleanState` to drop the
+manifests and `stage\`; `originals\` is always kept). `apply.ps1` is THE one
+file-mutating install command. `bin\Live-Install.ps1` and
 `bin\Finalize-Security.ps1` are superseded, kept as the measured reference only -
 do not run them alongside `apply.ps1`.
+
+Sandbox runs need both paths: `-Root <dir> -SystemResourceDir <dir>`. A
+non-default `-Root` with the live SystemResources directory is refused.

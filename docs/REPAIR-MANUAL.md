@@ -6,10 +6,12 @@ Icon-theme installer for `C:\Windows\SystemResources`: replaces three
 resource payloads with **merged** copies (stock resources + ARC theme icons),
 and can undo it. Root: `%ProgramData%\ArcIcons`.
 
-`apply.ps1` is THE one install command — there is no separate finalizer step
-(the finalize logic lives inside apply/restore). `bin\Live-Install.ps1` and
-`bin\Finalize-Security.ps1` are kept as measured reference only and are
-superseded; do not run them alongside `apply.ps1`.
+`apply.ps1` is THE one file-mutating install command — there is no separate
+finalizer step (the finalize logic lives inside apply/restore).
+`ARC-Icons.ps1 -Action install` / `-Action uninstall` orchestrate it: one
+action each, ending in a per-user icon-cache refresh and a VERIFY PASS.
+`bin\Live-Install.ps1` and `bin\Finalize-Security.ps1` are kept as measured
+reference only and are superseded; do not run them alongside `apply.ps1`.
 
 ## The measured mechanism and why each step exists
 
@@ -51,11 +53,42 @@ Every step below was measured live, not assumed:
   `AI` (auto-inherited) bit cannot be reproduced by the write — the restore
   step journals `exact=false` with `aceMatch=true` and the before/after SDDL
   strings instead of hiding that one access-neutral control-bit difference.
-- **Icon-cache refresh.** After installing, `ie4uinit.exe -show` alone is NOT
-  enough — delete `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache*.db`
-  and restart explorer, or the shell keeps painting the old icons. Apply and
-  restore do this automatically on live runs (`-SkipIconCacheRefresh` opts
-  out; sandbox runs never touch the shell).
+- **Icon-cache refresh — per user, not per caller.** After installing,
+  `ie4uinit.exe -show` alone is NOT enough — delete
+  `%LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache*.db` **and**
+  `thumbcache*.db`, then restart that profile's explorer, or the shell keeps
+  painting the old icons. Measured 2026-11-06: an elevated installer that read
+  only the CALLER's `%LOCALAPPDATA%` (and headless SYSTEM runs, whose
+  `%LOCALAPPDATA%` belongs to nobody) cleared the wrong profile; the owning
+  non-elevated user still saw light folders until they cleared iconcache
+  **and** thumbcache by hand. The refresh is therefore multi-user:
+  `bin\ArcIcons-UserRefresh.ps1` enumerates logged-on interactive sessions
+  (WTS) and maps each account to its SID/profile (`HKLM\...\ProfileList`),
+  refreshes the caller in-process, and for every OTHER profile registers a
+  one-shot scheduled task with an **InteractiveToken** principal (no password,
+  no TCB; works for local and domain accounts), starts it, waits for the
+  worker's receipt, then deletes that task. The worker
+  (`bin\Refresh-UserIconCache.ps1`) refuses a SID that is not its own token,
+  stops only its own session's explorer, drops both caches, runs
+  `ie4uinit -show`, restarts explorer and proves an explorer pid is back in
+  that same session. Apply and restore do this automatically on live runs
+  (`-SkipIconCacheRefresh` opts out; sandbox runs never touch a shell).
+
+### Why not upstream's Clear_icon_cache.bat
+
+Upstream `resource-redirect-icon-themes` ships `Scripts\Clear_icon_cache.bat`
+(verified 2026-11-06 against the live repo): `taskkill /f /im explorer.exe`,
+delete `%LocalAppData%\IconCache.db` + `Explorer\iconcache_*.db` +
+`Explorer\thumbcache_*.db`, `start explorer.exe`. This repo now drops the same
+two cache families for every logged-on profile, but differs in three measured
+ways: it runs the drop **inside each user's own session** (a session-0 or
+cross-user caller cannot restart a desktop it does not own), it treats the
+restart as a guarded unit per session (the worker only reports ok when an
+explorer pid is back in that session), and it runs `ie4uinit.exe -show`
+in-process. The old note that `thumbcache` was "upstream's thumbnail concern"
+was wrong: the live symptom was stale folder thumbnails surviving an
+`iconcache`-only clear, which is exactly why the owner had to clear both by
+hand.
 
 ## What was changed and why
 
@@ -122,9 +155,20 @@ runs (sandbox runs REQUIRE an explicit `-SystemResourceDir`). Live defaults:
 `-SystemResourceDir C:\Windows\SystemResources`. Run elevated.
 
 ```powershell
+# FULL INSTALL in one action: capture-if-fresh -> merge the chosen variant ->
+# restore-if-switching -> apply -> refresh EVERY logged-on profile -> verify PASS
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action install -Variant dark-grey -Yes
+# FULL UNINSTALL in one action: pristine originals -> refresh every profile ->
+# verify PASS (mode=original). Add -CleanState to also remove state.json,
+# installed-manifest.json and stage\; originals\ and logs\ are always kept.
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action uninstall -Yes
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action uninstall -CleanState -Yes
+# icon cache only, every logged-on profile
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action refresh -Yes
 # preview only (changes nothing)
+pwsh -NoProfile -File %ProgramData%\ArcIcons\ARC-Icons.ps1 -Action install -DryRun
 pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -DryRun
-# install the merged theme
+# install the merged theme without the controller (no variant switch, no verify)
 pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1
 # install, stopping mapped-file holders (explorer/RuntimeBroker) first
 pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -CloseHolders
@@ -137,11 +181,14 @@ pwsh -NoProfile -File %ProgramData%\ArcIcons\install-autorepair.ps1
 pwsh -NoProfile -File %ProgramData%\ArcIcons\remove-autorepair.ps1
 ```
 
-Flags: `-DryRun` (plan only), `-CloseHolders` (apply/restore: stop
+Flags: `-Action install|uninstall` (full, one action, ends in PASS),
+`-CleanState` (uninstall: also drop state.json / installed-manifest.json /
+stage\), `-DryRun` (plan only), `-CloseHolders` (apply/restore: stop
 Restart-Manager holders of mapped files first), `-SkipIconCacheRefresh`
-(apply/restore: skip the iconcache delete + explorer restart),
+(apply/restore: skip the per-user cache delete + explorer restart),
 `-Root` / `-SystemResourceDir` (sandbox runs REQUIRE an explicit
-`-SystemResourceDir`).
+`-SystemResourceDir`; the pair is the only supported sandbox form, and a
+non-default `-Root` may never pair with the live SystemResources directory).
 
 Preflight is unconditional and `-Force` can NEVER bypass it: the pristine
 backup must exist with `sha256 == originalSha256`, the stage file must exist
@@ -152,6 +199,41 @@ created from the verified stage/pristine source).
 
 `restore.ps1` never refuses a missing target: it recreates the file from the
 verified pristine backup and asserts hash + full SDDL afterwards.
+
+## Full install and full uninstall (one action each)
+
+`ARC-Icons.ps1 -Action install` is the whole install: variant source check,
+capture-pristine-originals-if-fresh, merge the requested variant,
+restore-originals-if-switching-variant, apply, refresh the icon cache for
+**every logged-on interactive profile**, then `verify.ps1` and require PASS.
+`-Action uninstall` is the whole uninstall: restore the pristine originals,
+refresh every logged-on profile, verify PASS with `mode=original`; `-CleanState`
+opts into removing `state.json`, `installed-manifest.json` and `stage\`
+(default keeps them so a reinstall stays safe). `originals\` — the only
+pristine copy — is never removed by any flag. Both actions are idempotent: a
+second install re-applies the same merge; a second uninstall restores
+already-pristine files.
+
+The refresh step is the part an elevated installer used to get wrong. It does
+not read the caller's `%LOCALAPPDATA%`; it enumerates sessions
+(`WTSEnumerateSessions`), maps each `DOMAIN\user` to a SID and profile path via
+the ProfileList registry key, and then:
+
+- refreshes the caller's own profile in-process (the caller is that user in
+  that session);
+- for every other profile, registers `ArcIcons-Refresh-<random>` with an
+  **InteractiveToken** principal for that user (no password, no stored
+  credential), starts it, waits for the worker's JSON receipt, and deletes
+  the task. The worker runs in that user's session, stops only that session's
+  explorer, deletes `iconcache*.db` + `thumbcache*.db` + legacy `IconCache.db`,
+  runs `ie4uinit -show`, restarts explorer, and exits 0 only when an explorer
+  pid is back in that session.
+- session 0 (the SYSTEM auto-repair task) never stops a shell it cannot
+  restore; it uses the same per-user task transport for every profile.
+
+Receipts land in `logs\refresh\`. If any logged-on profile cannot be refreshed
+the action fails loudly with the profile named, even when the payload itself
+verifies PASS.
 
 ## Detecting a Windows Update revert
 
@@ -194,21 +276,26 @@ re-merge procedure:
 1. Land the newer payload (`imageres.dll`, `imagesp1.dll`, `zipfldr.dll`) in the
    variant source dir `theme\<variant>\Windhawk Resources\`. Do not land
    `stage\` or `installed-manifest.json` by hand — the merge step writes both.
-2. Let the selector run the recipe: `ARC-Icons.ps1 -Action apply -Variant <id>`
-   (menu 9 → 1) self-chains merge → restore → apply → verify for a variant
-   switch; a newer payload for the SAME variant is menu 5 (merge) → 2 (revert)
-   → 1 (apply).
+2. Let the selector run the recipe: `ARC-Icons.ps1 -Action install -Variant <id>`
+   self-chains merge → restore → apply → per-user refresh → verify for a
+   variant switch (menu 11 → 1); a newer payload for the SAME variant is menu 7
+   (merge) → 4 (revert) → 3 (apply).
 3. A refusal is loud, never a silent close: the reason is named (missing variant
    source, or a live payload that is neither the recorded original nor the
    recorded merge) and the window holds open. Nothing is applied then.
 
 ## Recovery ladder
 
-1. `restore.ps1` first (puts pristine originals back, re-checks hash/owner/DACL
-   on both paths; recreates a missing target instead of refusing).
+1. `ARC-Icons.ps1 -Action uninstall -Yes` (or `restore.ps1` directly): puts the
+   pristine originals back, refreshes every logged-on profile's icon and
+   thumbnail cache, and re-checks hash/owner/DACL on both paths; it recreates a
+   missing target instead of refusing.
 2. `verify.ps1` in `original` mode → PASS means the OS files are pristine
    (theme invariants report `not-applicable` there by design).
-3. OS-level backstop only if 1–2 still fail:
+3. If the files verify but the desktop still shows stale icons, the payload was
+   not the problem: run `ARC-Icons.ps1 -Action refresh -Yes` and read the
+   per-profile lines; a profile listed FAIL could not restart its shell.
+4. OS-level backstop only if 1–2 still fail:
    `sfc /scannow`, then
    `DISM /Online /Cleanup-Image /RestoreHealth`.
 

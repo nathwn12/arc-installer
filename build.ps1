@@ -56,10 +56,12 @@ function Copy-Rel([string]$srcFull, [string]$rel) {
 $rootFiles = Get-ChildItem -Path (Join-Path $Root '*') -Include '*.ps1','*.cmd' -File | Where-Object { $_.Name -ne 'fetch-theme.ps1' -and $_.Name -ne 'build.ps1' }
 foreach ($f in $rootFiles) { Copy-Rel $f.FullName $f.Name }
 Write-Host "staged root: $(@($rootFiles).Count)"
+Write-Host ("  root: " + ((@($rootFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
 $binFiles = Get-ChildItem -Path (Join-Path $Root 'bin\*.ps1') -File
 foreach ($f in $binFiles) { Copy-Rel $f.FullName (Join-Path 'bin' $f.Name) }
 Write-Host "staged bin: $(@($binFiles).Count)"
+Write-Host ("  bin: " + ((@($binFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
 # payload docs: docs\<name> when present, else <name> at the root
 $docMap = @(
@@ -85,6 +87,23 @@ Write-Host "staged theme (skip zip): $(@($themeFiles).Count)"
 
 $total = (Get-ChildItem -LiteralPath $StageFiles -Recurse -File).Count
 Write-Host "staged total files: $total"
+if ($total -eq 0) { throw "nothing staged under $StageFiles - refusing to ship an empty payload" }
+
+# payload manifest: rel path (forward slashes) + sha256 for every staged file.
+# Embedded as payload-manifest.json so --selftest can verify hashes, not just
+# extraction. The manifest lists every file EXCEPT itself (it cannot hash
+# itself before it is written).
+$manFiles = Get-ChildItem -LiteralPath $StageFiles -Recurse -File | Sort-Object FullName
+$manRows = foreach ($f in $manFiles) {
+  $rel = $f.FullName.Substring($StageFiles.Length + 1) -replace '\\', '/'
+  [pscustomobject]@{ path = $rel; sha256 = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash }
+}
+$manifest = [pscustomobject]@{
+  generated = (Get-Date).ToString('o')
+  files = @($manRows)
+}
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $StageFiles 'payload-manifest.json') -Encoding utf8
+Write-Host ("payload-manifest.json: {0} file(s) recorded" -f @($manRows).Count)
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 [System.IO.Compression.ZipFile]::CreateFromDirectory($StageFiles, $ZipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)

@@ -22,8 +22,10 @@
 # Holders: a live file mapped by a running process cannot be deleted (share
 # lock, not ACL); holders come from the Restart Manager API and are named in
 # the failure; -CloseHolders stops them immediately before replacing that file.
-# Icon cache: ie4uinit -show alone is NOT enough — iconcache*.db is deleted and
-# explorer restarted afterwards (skipped for sandbox runs / -SkipIconCacheRefresh).
+# Icon cache: ie4uinit -show alone is NOT enough — for EVERY logged-on profile,
+# iconcache*.db AND thumbcache*.db are deleted and that profile's explorer is
+# restarted inside its own session (see bin\ArcIcons-UserRefresh.ps1; skipped
+# for sandbox runs / -SkipIconCacheRefresh).
 # Shell guarantee: every exit path runs Restore-ArcIconsShell, so explorer.exe is
 # never left stopped (verified restart, pid reported — see Set-BaselineSecurity).
 # Preflight (pristine/stage hashes, 3 unique allowlisted names, owner+SDDL
@@ -84,7 +86,7 @@ $origManPath = Join-Path $RootC 'originals\manifest.json'
 $instManPath = Join-Path $RootC 'installed-manifest.json'
 $VariantInfo = Get-ArcIconsVariantInfo $Variant
 if (-not $VariantInfo) {
-  Fail-Apply ("ARC-ICONS-APPLY: FAIL unknown -Variant '{0}'. Allowed: arc | neutral-brown | neutral-grey | dark-grey (the display names work too). No changes made." -f $Variant)
+  Fail-Apply ("ARC-ICONS-APPLY: FAIL unknown -Variant '{0}'. Allowed: arc | arc-symbolic | neutral-brown | neutral-grey | dark-grey (the display names work too). No changes made." -f $Variant)
 }
 $wasFreshInstall = $false
 try {
@@ -165,7 +167,7 @@ foreach ($f in $instMan.files) {
   $plan += [pscustomobject]@{ Name = $nm; Live = $live; LiveHash = $liveHash; Missing = $missing; Stage = $staged[$nm]; WantMerged = $wantMerged; Baseline = $baseline[$nm] }
 }
 if (($refusals.Count -gt 0) -and (-not $Force)) {
-  Fail-Apply ("ARC-ICONS-APPLY: REFUSED, no changes made:`n  " + ($refusals -join "`n  ") + "`nRe-run with -Force to override the LIVE-hash refusals above (preflight failures can never be overridden).`nSwitching variants? Run ARC-Icons.ps1 -Action apply -Variant <arc|neutral-brown|neutral-grey> -Yes: it re-merges that variant, restores the pristine originals, then applies.")
+  Fail-Apply ("ARC-ICONS-APPLY: REFUSED, no changes made:`n  " + ($refusals -join "`n  ") + "`nRe-run with -Force to override the LIVE-hash refusals above (preflight failures can never be overridden).`nSwitching variants? Run ARC-Icons.ps1 -Action apply -Variant <arc|arc-symbolic|neutral-brown|neutral-grey|dark-grey> -Yes: it re-merges that variant, restores the pristine originals, then applies.")
 }
 if ($DryRun) {
   Write-Output 'ARC-ICONS-APPLY: DRY-RUN plan (no changes made)'
@@ -259,7 +261,7 @@ try {
   })
   # post-state refresh: never let a shell hiccup throw into the rollback catch
   # (the payload is already installed and state.json already says installed).
-  try { $cacheNote = Invoke-ArcIconsIconCacheRefresh $SysC ([bool]$SkipIconCacheRefresh) }
+  try { $cacheNote = Invoke-ArcIconsIconCacheRefresh $SysC ([bool]$SkipIconCacheRefresh) $RootC }
   catch { $cacheNote = ("icon-cache refresh failed: {0}" -f $_) }
   Write-ArcIconsJournal $logDir 'apply.journal.jsonl' ([ordered]@{
     ts = (Get-Date).ToString('o'); op = 'icon-cache-refresh'; note = $cacheNote

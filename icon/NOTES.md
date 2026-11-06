@@ -54,16 +54,16 @@ icon-theme tool and sitting correctly next to the monochrome Arc shell icons.
 Single C# source, `src/IconForge.cs`, compiled with the in-box
 `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (C# 5, `System.Drawing` only).
 
-* Geometry is authored in **logical pixels** (`N` = target size) with size-aware clamps,
+- Geometry is authored in **logical pixels** (`N` = target size) with size-aware clamps,
   then scaled into a **4× supersampled** canvas and downsampled with `HighQualityBicubic`.
   Same source produces every size; there is no "draw once, shrink forever" pass.
-* Clamps keep every feature above the pixel floor at 16px: plate inset ≥1px, grid pad
+- Clamps keep every feature above the pixel floor at 16px: plate inset ≥1px, grid pad
   ≥1px, inter-swatch gap ≥1.5px, corner radii ≥0.5px. Hairline plate rim is skipped
   below 24px; the shadow stays soft and small.
-* The ICO is written by hand in `IconForge.cs` (`WriteIco` / `ToDib` / `ToPng`):
+- The ICO is written by hand in `IconForge.cs` (`WriteIco` / `ToDib` / `ToPng`):
   32bpp BGRA DIB payloads (bottom-up rows + 4-byte-aligned AND mask) for the small
   sizes, PNG payloads for 128 and 256.
-* `IconForge extract` parses the finished `.ico` back off disk and decodes both payload
+- `IconForge extract` parses the finished `.ico` back off disk and decodes both payload
   kinds, so every exported PNG is a genuine re-read of the file that ships.
 
 Reproduce everything:
@@ -127,19 +127,19 @@ f2838d91245876368649de722c5d9be283b4ebc06af4ac034112699b151fc231  candidates/can
 
 ## 5. Concerns / limits
 
-* **No visual verdict was rendered by me.** This seat is text-source only: it cannot take
+- **No visual verdict was rendered by me.** This seat is text-source only: it cannot take
   a screenshot or an image payload, so legibility was established by pixel metrics
   (coverage, bbox, quadrant ink balance, contrast against a white and a `#1E1E1E`
   desktop) and by ASCII-ramp dumps of the real decoded frames. A final human/vision
   eyeball of `icon-16-zoom8x.png` and `candidates/` is still the right last step —
   route it to `build-vision`, never to this seat.
-* **PNG round-trip alpha rounding.** `icon-256.png` differs from `candidates/candidate-A.png`
+- **PNG round-trip alpha rounding.** `icon-256.png` differs from `candidates/candidate-A.png`
   in 1616 of 65536 pixels, max channel delta 5, only on semi-transparent anti-aliased edge
   pixels (max alpha among the differing pixels: 253). Cause: GDI+ decodes PNG through
   premultiplied alpha. Opaque pixels are identical; the difference cannot be seen. The DIB
   path is bit-exact (see the shared 32px hash).
-* **`IconForge.exe` in `tools/`** is a build product kept for convenience. If it is ever
+- **`IconForge.exe` in `tools/`** is a build product kept for convenience. If it is ever
   treated as untrusted, re-run `build.ps1` — the source is the authority.
-* **Not proven here:** how the icon looks in Windows Explorer/taskbar, how it reads next to
+- **Not proven here:** how the icon looks in Windows Explorer/taskbar, how it reads next to
   the four Arc shell icon sets, and DPI-scaled rendering at 125/150/175%. These need the
   live desktop.

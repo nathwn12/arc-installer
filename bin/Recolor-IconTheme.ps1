@@ -21,19 +21,33 @@
 # RT_ICON length" exactly (measured on all three Neutral Grey payloads), and the
 # destination is re-checked against it after the write.
 #
-# Luminance floor: a straight multiply sends an already-dark icon toward black
-# (measured: the Hard drive family sits at mean luminance 78-91, and k = 0.55
-# alone drove it to ~43-50). So each entry gets its OWN effective factor:
-#   kEff = min(1, max(K, Floor / meanLuminance))
-# i.e. an icon whose result would land below the floor is multiplied less; an
-# icon already darker than the floor is left at kEff = 1 (unchanged). The factor
-# stays a single scalar per icon, so every channel is scaled by the same number:
-# hue and saturation ratios are preserved EXACTLY - this tool never desaturates.
-# A per-PIXEL floor was rejected on purpose: clamping each channel separately
-# lands all three channels on the same value, which IS desaturation.
+# Luminance floor, one factor per GROUP: a straight multiply sends an
+# already-dark icon toward black (measured: the Hard drive family sits at mean
+# luminance 78-91, and k = 0.55 alone drove it to ~43-50). Every RT_GROUP_ICON
+# (#14) gets ONE effective factor for ALL of its RT_ICON sizes:
+#   kEff = min(1, max(K, Floor / groupMeanLuminance))
+# so a glyph cannot come out dark at 16 px and light at 256 px (a dyed size).
+# The factor is a single scalar, so every channel of every member is scaled by
+# the same number: hue and saturation ratios are preserved EXACTLY - this tool
+# never desaturates. A per-PIXEL floor was rejected on purpose: clamping each
+# channel separately lands all three channels on the same value, which IS
+# desaturation. groupMeanLuminance is the visible-pixel-weighted mean over the
+# group's members; an RT_ICON in no group falls back to its own mean.
 # Mean luminance is measured over VISIBLE pixels only (alpha >= 128 for 32bpp /
 # PNG; the AND mask decides for 24bpp and palette bitmaps), so a transparent
 # background cannot drag the mean down.
+#
+# Neutral-axis guard (checked on the recolored bytes, fails closed):
+#   * a neutral source entry (its mean channel spread <= 6, i.e. grey) must
+#     stay neutral: output spread <= 6. A residual tint means a dyed grey.
+#   * a chromatic source entry (spread > 6, e.g. the blue network glyph) may
+#     keep its hue, but the recolor must stay ON the neutral axis: every output
+#     channel mean equals sourceMean * kEff within 1, and the output spread
+#     equals srcSpread * kEff within 2. Any other deviation is a reject.
+#   * fully transparent entries (no visible pixel) are skipped byte-for-byte:
+#     there is nothing to darken, and a PNG re-encode would only churn bytes.
+# Indexed (1/4/8bpp) bitmaps recolor the palette only; indices, mask and every
+# other byte keep their exact source value.
 #
 # Params: -Source <payload DLL to read>   (never modified)
 #         -Dest   <payload DLL to write>  (created; must not equal -Source)
@@ -335,6 +349,71 @@ public static class ArcRecolor {
         }
         return ch;
     }
+
+    // ---- mean RGB per visible pixel (for the per-GROUP factor + neutral guard).
+    // Returns { meanR, meanG, meanB, visibleCount }. Luminance of the mean equals
+    // the mean luminance because the Rec.709 weights are linear.
+    static double[] Pack(double sr, double sg, double sb, int n) {
+        if (n == 0) return new double[] { 0, 0, 0, 0 };
+        return new double[] { sr / n, sg / n, sb / n, n };
+    }
+    public static double[] Stats32(byte[] b, int off, int pixelBytes) {
+        double r = 0, g = 0, bl = 0; int n = 0;
+        for (int i = 0; i < pixelBytes; i += 4) {
+            if (b[off + i + 3] < 128) continue;
+            bl += b[off + i]; g += b[off + i + 1]; r += b[off + i + 2]; n++;
+        }
+        return Pack(r, g, bl, n);
+    }
+    public static double[] Stats24(byte[] b, int off, int stride, int w, int h, int maskOff, int maskStride) {
+        double r = 0, g = 0, bl = 0; int n = 0;
+        for (int y = 0; y < h; y++) {
+            int row = off + y * stride;
+            for (int x = 0; x < w; x++) {
+                if (maskOff >= 0 && Masked(b, maskOff, maskStride, x, y)) continue;
+                int p = row + x * 3;
+                bl += b[p]; g += b[p + 1]; r += b[p + 2]; n++;
+            }
+        }
+        return Pack(r, g, bl, n);
+    }
+    public static double[] StatsIndexed(byte[] b, int palOff, int palCount, int pixOff, int stride,
+                                        int w, int h, int bpp, int maskOff, int maskStride) {
+        double r = 0, g = 0, bl = 0; int n = 0;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                if (maskOff >= 0 && Masked(b, maskOff, maskStride, x, y)) continue;
+                int idx = IndexAt(b, pixOff, stride, bpp, x, y);
+                if (idx < 0 || idx >= palCount) continue;
+                int p = palOff + idx * 4;
+                bl += b[p]; g += b[p + 1]; r += b[p + 2]; n++;
+            }
+        }
+        return Pack(r, g, bl, n);
+    }
+    public static double[] StatsRgba32(byte[] buf, int stride, int w, int h) {
+        double r = 0, g = 0, bl = 0; int n = 0;
+        for (int y = 0; y < h; y++) {
+            int row = y * stride;
+            for (int x = 0; x < w; x++) {
+                int i = row + x * 4;
+                if (buf[i + 3] < 128) continue;
+                bl += buf[i]; g += buf[i + 1]; r += buf[i + 2]; n++;
+            }
+        }
+        return Pack(r, g, bl, n);
+    }
+    public static double[] StatsRgb24(byte[] buf, int stride, int w, int h) {
+        double r = 0, g = 0, bl = 0; int n = 0;
+        for (int y = 0; y < h; y++) {
+            int row = y * stride;
+            for (int x = 0; x < w; x++) {
+                int i = row + x * 3;
+                bl += buf[i]; g += buf[i + 1]; r += buf[i + 2]; n++;
+            }
+        }
+        return Pack(r, g, bl, n);
+    }
 }
 '@
 }
@@ -396,8 +475,8 @@ function Get-BitmapPlan([byte[]]$b) {
 }
 
 function Get-EffectiveFactor([double]$mean, [int]$visible) {
-    # min(1, max(K, Floor/mean)): one scalar per icon, so hue is untouched.
-    # mean = 0 (no visible pixel at all) takes the plain factor.
+    # min(1, max(K, Floor/mean)): one scalar per GROUP, so no member size can
+    # drift and hue is untouched. mean = 0 (no visible pixel) takes K.
     $eff = $K
     if ($visible -gt 0 -and $mean -gt 0) {
         $need = $Floor / $mean
@@ -406,81 +485,110 @@ function Get-EffectiveFactor([double]$mean, [int]$visible) {
     }
     return $eff
 }
-
-function Get-RecoloredDib([byte[]]$b, $plan) {
-    # Measured 2026-10-14: a plain multiply drives the dark ARC icons toward
-    # black, so the per-icon floor decides the factor first, then the multiply.
+function Get-Lum([double]$r, [double]$g, [double]$b) {
+    return 0.2126 * $r + 0.7152 * $g + 0.0722 * $b
+}
+function Get-BitmapStats([byte[]]$b, $plan) {
+    $st = switch ($plan.Kind) {
+        'dib32' { [ArcRecolor]::Stats32($b, $plan.PixelOffset, $plan.PixelBytes) }
+        'dib24' { [ArcRecolor]::Stats24($b, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.MaskOffset, $plan.MaskStride) }
+        'indexed' { [ArcRecolor]::StatsIndexed($b, $plan.PaletteOffset, $plan.PaletteCount, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.Bpp, $plan.MaskOffset, $plan.MaskStride) }
+        default { throw "Get-BitmapStats got an unknown kind '$($plan.Kind)'." }
+    }
+    return $st
+}
+function Get-BitmapRecolored([byte[]]$b, $plan, [double]$eff) {
+    # One group factor is passed in; this function only multiplies and reports
+    # the recolored mean RGB so the neutral-axis guard can check the real bytes.
     $out = New-Object byte[] $b.Length
     [Array]::Copy($b, $out, $b.Length)
-    switch ($plan.Kind) {
-        'dib32' {
-            $st = [ArcRecolor]::Mean32($b, $plan.PixelOffset, $plan.PixelBytes)
-            $eff = Get-EffectiveFactor $st[0] ([int]$st[1])
-            $changed = [ArcRecolor]::Mul32($b, $out, $plan.PixelOffset, $plan.PixelBytes, $eff)
-        }
-        'dib24' {
-            $st = [ArcRecolor]::Mean24($b, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.MaskOffset, $plan.MaskStride)
-            $eff = Get-EffectiveFactor $st[0] ([int]$st[1])
-            $changed = [ArcRecolor]::Mul24($b, $out, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $eff)
-        }
-        'indexed' {
-            $st = [ArcRecolor]::MeanIndexed($b, $plan.PaletteOffset, $plan.PaletteCount, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.Bpp, $plan.MaskOffset, $plan.MaskStride)
-            $eff = Get-EffectiveFactor $st[0] ([int]$st[1])
-            $changed = [ArcRecolor]::MulPalette($b, $out, $plan.PaletteOffset, $plan.PaletteCount, $eff)
-        }
-        default { throw "Get-RecoloredDib got an unknown kind '$($plan.Kind)'." }
+    $changed = switch ($plan.Kind) {
+        'dib32' { [ArcRecolor]::Mul32($b, $out, $plan.PixelOffset, $plan.PixelBytes, $eff) }
+        'dib24' { [ArcRecolor]::Mul24($b, $out, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $eff) }
+        'indexed' { [ArcRecolor]::MulPalette($b, $out, $plan.PaletteOffset, $plan.PaletteCount, $eff) }
+        default { throw "Get-BitmapRecolored got an unknown kind '$($plan.Kind)'." }
     }
-    return @{ Bytes = $out; Changed = $changed; Mean = $st[0]; Visible = [int]$st[1]; Eff = $eff }
+    $outStats = switch ($plan.Kind) {
+        'dib32' { [ArcRecolor]::Stats32($out, $plan.PixelOffset, $plan.PixelBytes) }
+        'dib24' { [ArcRecolor]::Stats24($out, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.MaskOffset, $plan.MaskStride) }
+        'indexed' { [ArcRecolor]::StatsIndexed($out, $plan.PaletteOffset, $plan.PaletteCount, $plan.PixelOffset, $plan.Stride, $plan.Width, $plan.Height, $plan.Bpp, $plan.MaskOffset, $plan.MaskStride) }
+    }
+    return @{ Bytes = $out; Changed = $changed; R = $outStats[0]; G = $outStats[1]; B = $outStats[2]; Visible = [int]$outStats[3] }
 }
 
-function Get-RecoloredPng([byte[]]$b) {
-    # Decode -> multiply RGB in place on the locked buffer -> re-encode. The
-    # source PNGs in these payloads are all 32bpp with alpha (measured), so the
-    # alpha channel survives untouched; a 24bpp PNG keeps its 3 bytes per pixel.
+function Open-PngBuffer([byte[]]$b) {
+    # Decode -> a 32bpp ARGB (or source 24bpp) bitmap plus one locked buffer's
+    # copy. Returns the pieces so stats and recolor share no state.
     $ms = New-Object IO.MemoryStream(, $b)
     $img = [System.Drawing.Bitmap]::FromStream($ms)
     $bmp = $img
     $owned = $false
+    $fmt = $img.PixelFormat
+    if ($fmt -ne [System.Drawing.Imaging.PixelFormat]::Format32bppArgb -and
+        $fmt -ne [System.Drawing.Imaging.PixelFormat]::Format24bppRgb) {
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $img.Width, $img.Height)
+        $bmp = $img.Clone($rect, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $owned = $true
+        $fmt = $bmp.PixelFormat
+    }
+    return @{ Ms = $ms; Img = $img; Bmp = $bmp; Owned = $owned; Fmt = $fmt }
+}
+function Close-PngBuffer($p) {
+    if ($p.Owned) { $p.Bmp.Dispose() }
+    $p.Img.Dispose(); $p.Ms.Dispose()
+}
+function Get-PngStats([byte[]]$b) {
+    # Decode only: mean RGB of the visible pixels. Recolored bytes are measured
+    # separately, so the guard never trusts the scalar arithmetic alone.
+    $p = Open-PngBuffer $b
     try {
-        $fmt = $img.PixelFormat
-        if ($fmt -ne [System.Drawing.Imaging.PixelFormat]::Format32bppArgb -and
-            $fmt -ne [System.Drawing.Imaging.PixelFormat]::Format24bppRgb) {
-            $rect = New-Object System.Drawing.Rectangle(0, 0, $img.Width, $img.Height)
-            $bmp = $img.Clone($rect, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-            $owned = $true
-            $fmt = $bmp.PixelFormat
-        }
-        $rect = New-Object System.Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)
-        $lock = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadWrite, $fmt)
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $p.Bmp.Width, $p.Bmp.Height)
+        $lock = $p.Bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, $p.Fmt)
         try {
             $stride = $lock.Stride
-            $len = $stride * $bmp.Height
+            $len = $stride * $p.Bmp.Height
             $buf = New-Object byte[] $len
             [Runtime.InteropServices.Marshal]::Copy($lock.Scan0, $buf, 0, $len)
-            if ($fmt -eq [System.Drawing.Imaging.PixelFormat]::Format32bppArgb) {
-                $st = [ArcRecolor]::MeanRgba32($buf, $stride, $bmp.Width, $bmp.Height)
-                $eff = Get-EffectiveFactor $st[0] ([int]$st[1])
-                $changed = [ArcRecolor]::MulRgba32($buf, $stride, $bmp.Width, $bmp.Height, $eff)
+            if ($p.Fmt -eq [System.Drawing.Imaging.PixelFormat]::Format32bppArgb) {
+                return [ArcRecolor]::StatsRgba32($buf, $stride, $p.Bmp.Width, $p.Bmp.Height)
+            }
+            return [ArcRecolor]::StatsRgb24($buf, $stride, $p.Bmp.Width, $p.Bmp.Height)
+        }
+        finally { $p.Bmp.UnlockBits($lock) }
+    }
+    finally { Close-PngBuffer $p }
+}
+function Get-PngRecolored([byte[]]$b, [double]$eff) {
+    # Decode -> multiply RGB in place on the locked buffer -> re-encode. Alpha
+    # survives untouched; the recolored buffer is measured before encoding.
+    $p = Open-PngBuffer $b
+    try {
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $p.Bmp.Width, $p.Bmp.Height)
+        $lock = $p.Bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadWrite, $p.Fmt)
+        try {
+            $stride = $lock.Stride
+            $len = $stride * $p.Bmp.Height
+            $buf = New-Object byte[] $len
+            [Runtime.InteropServices.Marshal]::Copy($lock.Scan0, $buf, 0, $len)
+            if ($p.Fmt -eq [System.Drawing.Imaging.PixelFormat]::Format32bppArgb) {
+                $changed = [ArcRecolor]::MulRgba32($buf, $stride, $p.Bmp.Width, $p.Bmp.Height, $eff)
+                $outStats = [ArcRecolor]::StatsRgba32($buf, $stride, $p.Bmp.Width, $p.Bmp.Height)
             } else {
-                $st = [ArcRecolor]::MeanRgb24($buf, $stride, $bmp.Width, $bmp.Height)
-                $eff = Get-EffectiveFactor $st[0] ([int]$st[1])
-                $changed = [ArcRecolor]::MulRgb24($buf, $stride, $bmp.Width, $bmp.Height, $eff)
+                $changed = [ArcRecolor]::MulRgb24($buf, $stride, $p.Bmp.Width, $p.Bmp.Height, $eff)
+                $outStats = [ArcRecolor]::StatsRgb24($buf, $stride, $p.Bmp.Width, $p.Bmp.Height)
             }
             [Runtime.InteropServices.Marshal]::Copy($buf, 0, $lock.Scan0, $len)
         }
-        finally { $bmp.UnlockBits($lock) }
+        finally { $p.Bmp.UnlockBits($lock) }
         $out = New-Object IO.MemoryStream
         try {
-            $bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
+            $p.Bmp.Save($out, [System.Drawing.Imaging.ImageFormat]::Png)
             $new = $out.ToArray()
         }
         finally { $out.Dispose() }
-        return @{ Bytes = $new; Changed = $changed; Mean = $st[0]; Visible = [int]$st[1]; Eff = $eff }
+        return @{ Bytes = $new; Changed = $changed; R = $outStats[0]; G = $outStats[1]; B = $outStats[2]; Visible = [int]$outStats[3] }
     }
-    finally {
-        if ($owned) { $bmp.Dispose() }
-        $img.Dispose(); $ms.Dispose()
-    }
+    finally { Close-PngBuffer $p }
 }
 
 Add-Type -AssemblyName System.Drawing
@@ -491,40 +599,152 @@ $srcSha = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
 $entries = @([ArcRecolor]::ReadIcons($Source) | Sort-Object -Property NameInt)
 Write-Output ("SOURCE {0} size={1} sha256={2} RT_ICON={3}" -f (Split-Path -Leaf $Source), $srcSize, $srcSha, $entries.Count)
 
-$planned = @()
+function Get-IconKey($entry) { return ("{0}|{1}" -f $entry.NameForm, $entry.Lang) }
+
+$analysis = New-Object System.Collections.ArrayList
 $unsupported = @()
 foreach ($e in $entries) {
     $isPng = ($e.Data.Length -ge 4 -and $e.Data[0] -eq 0x89 -and $e.Data[1] -eq 0x50 -and $e.Data[2] -eq 0x4E -and $e.Data[3] -eq 0x47)
     if ($isPng) {
-        $rc = Get-RecoloredPng $e.Data
+        $st = Get-PngStats $e.Data
+        $plan = $null
         $kind = 'png'
-        $geo = "png $($e.Data.Length) B -> $($rc.Bytes.Length) B"
+        $geo = "png {0} B" -f $e.Data.Length
     } else {
         $plan = Get-BitmapPlan $e.Data
         if (-not $plan.Ok) {
             $unsupported += [pscustomobject]@{ Name = $e.NameForm; Reason = $plan.Reason; Bytes = $e.Data.Length }
             continue
         }
-        $rc = Get-RecoloredDib $e.Data $plan
+        $st = Get-BitmapStats $e.Data $plan
         $kind = $plan.Kind
         $geo = "{0} {1}x{2} {3}B pixel={4} B" -f $plan.Kind, $plan.Width, $plan.Height, $e.Data.Length, $plan.PixelBytes
     }
-    $planned += [pscustomobject]@{
-        Entry = $e; Kind = $kind; New = $rc.Bytes; Changed = $rc.Changed
-        Mean = $rc.Mean; Visible = $rc.Visible; Eff = $rc.Eff
-        FloorClamped = ($rc.Eff -gt $K); FloorHeld = ($rc.Eff -ge 1.0)
-    }
-    Write-Output ("PLAN {0} {1} meanLum={2} visible={3} kEff={4} changed={5} B" -f `
-            $e.NameForm, $geo, [Math]::Round($rc.Mean, 2), $rc.Visible, [Math]::Round($rc.Eff, 4), $rc.Changed)
+    $spread = [Math]::Max([Math]::Max($st[0], $st[1]), $st[2]) - [Math]::Min([Math]::Min($st[0], $st[1]), $st[2])
+    [void]$analysis.Add([pscustomobject]@{
+        Entry = $e; Kind = $kind; Plan = $plan; IsPng = $isPng; Data = $e.Data; Geo = $geo
+        R = $st[0]; G = $st[1]; B = $st[2]; Visible = [int]$st[3]
+        Lum = (Get-Lum $st[0] $st[1] $st[2]); Spread = $spread
+        Neutral = ($spread -le 6); KEff = 0.0; GroupKey = ''; Ungrouped = $false
+    })
 }
 foreach ($s in $unsupported) { Write-Output ("UNSUPPORTED {0} {1} B - {2}" -f $s.Name, $s.Bytes, $s.Reason) }
+
+# ---- group pass: ONE kEff per RT_GROUP_ICON, shared by every member size ----
+$byNid = @{}
+foreach ($a in $analysis) {
+    if (-not $byNid.ContainsKey($a.Entry.NameForm)) { $byNid[$a.Entry.NameForm] = $a }
+}
+$groupEntries = @([ArcRecolor]::ReadType($Source, 14) | Sort-Object -Property NameInt)
+$groupInfo = [ordered]@{}
+$iconGroups = @{}
+foreach ($g in $groupEntries) {
+    if ($g.Data.Length -lt 6) { continue }
+    $count = [BitConverter]::ToUInt16($g.Data, 4)
+    $seen = @{}
+    $members = @()
+    for ($i = 0; $i -lt $count; $i++) {
+        $off = 6 + $i * 14
+        if ($off + 14 -gt $g.Data.Length) { continue }
+        $nid = '#' + [BitConverter]::ToUInt16($g.Data, $off + 12)
+        if ($seen.ContainsKey($nid)) { continue }
+        $seen[$nid] = $true
+        if ($byNid.ContainsKey($nid)) { $members += $byNid[$nid] }
+    }
+    if ($members.Count -eq 0) { continue }
+    $vis = 0; $sr = 0.0; $sg = 0.0; $sb = 0.0
+    foreach ($m in $members) {
+        if ($m.Visible -le 0) { continue }
+        $vis += $m.Visible; $sr += $m.R * $m.Visible; $sg += $m.G * $m.Visible; $sb += $m.B * $m.Visible
+    }
+    $meanLum = 0.0
+    if ($vis -gt 0) { $meanLum = Get-Lum ($sr / $vis) ($sg / $vis) ($sb / $vis) }
+    $eff = Get-EffectiveFactor $meanLum $vis
+    $gk = "{0}|{1}" -f $g.NameForm, $g.Lang
+    $groupInfo[$gk] = [pscustomobject]@{
+        Key = $gk; Name = $g.NameForm; Lang = $g.Lang; Members = @($members)
+        Visible = $vis; MeanLum = $meanLum; KEff = $eff
+    }
+    foreach ($m in $members) {
+        $ik = Get-IconKey $m.Entry
+        if (-not $iconGroups.ContainsKey($ik)) { $iconGroups[$ik] = @() }
+        $iconGroups[$ik] += $gk
+    }
+    Write-Output ("GROUP {0} lang={1} members={2} meanLum={3} visible={4} kEff={5}" -f `
+            $g.NameForm, $g.Lang, $members.Count, [Math]::Round($meanLum, 2), $vis, [Math]::Round($eff, 4))
+}
+$groupConflicts = 0
+foreach ($a in $analysis) {
+    $ik = Get-IconKey $a.Entry
+    if ($iconGroups.ContainsKey($ik)) {
+        $gks = @($iconGroups[$ik])
+        $a.GroupKey = $gks[0]
+        $a.KEff = [double]$groupInfo[$a.GroupKey].KEff
+        # a member referenced by two groups with different factors is a data
+        # conflict, not something to paper over with an average.
+        foreach ($other in $gks) {
+            if ($other -ne $a.GroupKey -and [Math]::Abs([double]$groupInfo[$other].KEff - $a.KEff) -gt 0.0001) { $groupConflicts++ }
+        }
+    } else {
+        $a.Ungrouped = $true
+        $a.KEff = Get-EffectiveFactor $a.Lum $a.Visible
+    }
+}
+
+# ---- recolor + neutral-axis guard (measured on the bytes just produced) ----
+$planned = @()
+$violations = @()
+$skippedTransparent = 0
+$guardNeutral = 0
+$guardChromatic = 0
+foreach ($a in $analysis) {
+    if ($a.Visible -eq 0) {
+        $skippedTransparent++
+        Write-Output ("SKIP {0} {1} fully transparent - left byte-identical" -f $a.Entry.NameForm, $a.Geo)
+        continue
+    }
+    $eff = [double]$a.KEff
+    if ($a.IsPng) {
+        $rc = Get-PngRecolored $a.Data $eff
+        $geoOut = "png {0} B -> {1} B" -f $a.Data.Length, $rc.Bytes.Length
+    } else {
+        $rc = Get-BitmapRecolored $a.Data $a.Plan $eff
+        $geoOut = $a.Geo
+    }
+    $outSpread = [Math]::Max([Math]::Max($rc.R, $rc.G), $rc.B) - [Math]::Min([Math]::Min($rc.R, $rc.G), $rc.B)
+    $dev = [Math]::Max([Math]::Abs($rc.R - $a.R * $eff), [Math]::Max([Math]::Abs($rc.G - $a.G * $eff), [Math]::Abs($rc.B - $a.B * $eff)))
+    $bad = ''
+    if ($dev -gt 1.0) {
+        $bad = ("off neutral axis: channel mean deviation {0:N2}" -f $dev)
+    } elseif ($a.Neutral -and $outSpread -gt 6) {
+        $bad = ("dyed grey: neutral group output spread {0:N2} > 6" -f $outSpread)
+    } elseif (-not $a.Neutral -and [Math]::Abs($outSpread - $a.Spread * $eff) -gt 2.0) {
+        $bad = ("chroma drift: output spread {0:N2} != source*{1:N2} (expected {2:N2})" -f $outSpread, $eff, ($a.Spread * $eff))
+    }
+    if ($bad) {
+        $violations += ("{0} [{1}] {2} - {3}" -f $a.Entry.NameForm, $a.GroupKey, $a.Kind, $bad)
+        continue
+    }
+    if ($a.Neutral) { $guardNeutral++ } else { $guardChromatic++ }
+    $planned += [pscustomobject]@{
+        Entry = $a.Entry; Kind = $a.Kind; New = $rc.Bytes; Changed = $rc.Changed
+        Mean = $a.Lum; OutSpread = $outSpread; Visible = $a.Visible; Eff = $eff; GroupKey = $a.GroupKey
+        FloorClamped = ($eff -gt $K); FloorHeld = ($eff -ge 1.0)
+    }
+    Write-Output ("PLAN {0} {1} group={2} meanLum={3} kEff={4} outSpread={5} changed={6} B" -f `
+            $a.Entry.NameForm, $geoOut, $a.GroupKey, [Math]::Round($a.Lum, 2), [Math]::Round($eff, 4), [Math]::Round($outSpread, 2), $rc.Changed)
+}
+foreach ($v in $violations) { Write-Output ("GUARD-REJECT {0}" -f $v) }
+if ($violations.Count -gt 0) {
+    throw ("Nothing written: {0} entr(y/ies) failed the neutral-axis guard (see GUARD-REJECT above) - refusing to ship a dyed grey." -f $violations.Count)
+}
+
 
 # ---- RT_GROUP_ICON: a PNG re-encode changes the entry length, and the group
 # ---- directory declares that length, so the declaring entry is rewritten too.
 $iconLen = @{}
 foreach ($p in $planned) { $iconLen["$($p.Entry.NameForm)|$($p.Entry.Lang)"] = $p.New.Length }
 $groupPlans = @()
-$groupEntries = @([ArcRecolor]::ReadType($Source, 14))
 foreach ($g in $groupEntries) {
     $nb = New-Object byte[] $g.Data.Length
     [Array]::Copy($g.Data, $nb, $g.Data.Length)
@@ -557,10 +777,10 @@ $totalChanged = 0
 foreach ($p in $planned) { $totalChanged += $p.Changed }
 $clamped = @($planned | Where-Object FloorClamped).Count
 $held = @($planned | Where-Object FloorHeld).Count
-$noPixels = @($planned | Where-Object Visible -eq 0).Count
-Write-Output ("RECOLOR-PLAN file={0} entries={1} dib32={2} dib24={3} dib_indexed={4} png={5} unsupported={6} floorClamped={7} floorHeld={8} noVisiblePixels={9} groupsResized={10} changedBytes={11} k={12} floor={13}" -f `
+$ungrouped = @($analysis | Where-Object Ungrouped).Count
+Write-Output ("RECOLOR-PLAN file={0} entries={1} dib32={2} dib24={3} dib_indexed={4} png={5} unsupported={6} groups={7} ungrouped={8} floorClamped={9} floorHeld={10} skippedTransparent={11} guardNeutral={12} guardChromatic={13} guardViolations={14} groupConflicts={15} groupsResized={16} changedBytes={17} k={18} floor={19}" -f `
         (Split-Path -Leaf $Source), $entries.Count, $counts['dib32'], $counts['dib24'], $counts['indexed'], $counts['png'], `
-        $unsupported.Count, $clamped, $held, $noPixels, $groupPlans.Count, $totalChanged, $K, $Floor)
+        $unsupported.Count, $groupInfo.Count, $ungrouped, $clamped, $held, $skippedTransparent, $guardNeutral, $guardChromatic, $violations.Count, $groupConflicts, $groupPlans.Count, $totalChanged, $K, $Floor)
 
 if ($DryRun) {
     Write-Output 'RECOLOR: DRY-RUN (nothing written)'

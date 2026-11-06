@@ -9,7 +9,9 @@
 # group + DACL + protection flag, verified by full SDDL compare) on BOTH the
 # new file AND the surviving sibling -> assert live hash == originalSha256.
 # Privileges are enabled IN-PROCESS; holders come from Restart Manager
-# (-CloseHolders stops them); icon cache is refreshed unless skipped.
+# (-CloseHolders stops them); the icon cache is refreshed for EVERY logged-on
+# profile (iconcache*.db + thumbcache*.db, verified explorer restart in each
+# profile's own session) unless skipped.
 # A MISSING live target is CREATED from the verified pristine backup (never
 # refused): a delete-then-copy failure that leaves a missing target is
 # recovered here, not reported as unfixable. Any live hash (merged theme,
@@ -187,7 +189,7 @@ try {
     dryRun = $false; forced = [bool]$Force; result = 'ok'
     files = @($results | ForEach-Object { [ordered]@{ name = $_.name; before = $_.before; after = $_.after; owner = $_.owner } })
   })
-  try { $cacheNote = Invoke-ArcIconsIconCacheRefresh $SysC ([bool]$SkipIconCacheRefresh) }
+  try { $cacheNote = Invoke-ArcIconsIconCacheRefresh $SysC ([bool]$SkipIconCacheRefresh) $RootC }
   catch { $cacheNote = ("icon-cache refresh failed: {0}" -f $_) }
   Write-ArcIconsJournal $logDir 'restore.journal.jsonl' ([ordered]@{
     ts = (Get-Date).ToString('o'); op = 'icon-cache-refresh'; note = $cacheNote

@@ -15,7 +15,8 @@
 [CmdletBinding()]
 param(
   [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
-  [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources')
+  [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),
+  [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'bin\Set-BaselineSecurity.ps1')
@@ -34,20 +35,27 @@ if (-not (Test-Path -LiteralPath $SysC -PathType Container)) {
 }
 
 $logDir = Join-Path $RootC 'logs'
-if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 $lockHeld = $false
-try { [void](Acquire-ArcIconsLock $logDir 90); $lockHeld = $true }
-catch { Fail-Repair ("ARC-ICONS-REPAIR: FAIL lock: {0}" -f $_) }
+if ($DryRun) {
+  # Preview only: no lock file, no log dir, no writes of any kind.
+  $logDir = $null
+} else {
+  if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+  try { [void](Acquire-ArcIconsLock $logDir 90); $lockHeld = $true }
+  catch { Fail-Repair ("ARC-ICONS-REPAIR: FAIL lock: {0}" -f $_) }
+}
 
 try {
   $statePath = Join-Path $RootC 'state.json'
   if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+    if ($DryRun) { Write-Output 'ARC-ICONS-REPAIR-DRYRUN: no-action (no state.json); wrote NOTHING.'; exit 0 }
     Write-ArcIconsJournal $logDir 'repair.jsonl' ([ordered]@{ ts = (Get-Date).ToString('o'); op = 'repair'; verdict = 'no-action'; reason = 'state.json absent; nothing installed by this tooling' })
     Write-Output 'ARC-ICONS-REPAIR: no-action (no state.json).'
     exit 0
   }
   $mode = [string]((Read-ArcIconsJsonFile $statePath).mode)
   if ($mode -ne 'installed') {
+    if ($DryRun) { Write-Output ("ARC-ICONS-REPAIR-DRYRUN: no-action (mode={0}); wrote NOTHING." -f $mode); exit 0 }
     Write-ArcIconsJournal $logDir 'repair.jsonl' ([ordered]@{ ts = (Get-Date).ToString('o'); op = 'repair'; verdict = 'no-action'; reason = "mode=$mode; theme not installed" })
     Write-Output ("ARC-ICONS-REPAIR: no-action (mode={0})." -f $mode)
     exit 0
@@ -84,6 +92,18 @@ try {
     if ($h -eq $wantMerged) { $classOf[$nm] = 'merged' }
     elseif ($h -eq $wantOrig) { $classOf[$nm] = 'original'; $originals += $nm }
     else { $classOf[$nm] = 'unknown'; $unknown += $nm }
+  }
+
+  if ($DryRun) {
+    # Classification only: per-file verdict, no journal, no state.json, no nested apply.
+    foreach ($nm in @($classOf.Keys | Sort-Object)) {
+      $verdict = 'drift'
+      if ($classOf[$nm] -eq 'merged') { $verdict = 'healthy' }
+      elseif ($classOf[$nm] -eq 'original') { $verdict = 'original' }
+      Write-Output ("ARC-ICONS-REPAIR-DRYRUN: {0} {1} live={2}" -f $nm, $verdict, $before[$nm])
+    }
+    Write-Output 'ARC-ICONS-REPAIR-DRYRUN: preview only; wrote NOTHING.'
+    exit 0
   }
 
   if ($unknown.Count -eq 0 -and $originals.Count -eq 0) {

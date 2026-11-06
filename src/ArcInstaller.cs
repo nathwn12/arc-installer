@@ -251,6 +251,62 @@ static class Program
             {
                 return 1;
             }
+            // Payload integrity: every extracted file must match the hash
+            // build.ps1 recorded in payload-manifest.json. Extraction alone
+            // proves nothing about content; this closes that gap.
+            string manPath = Path.Combine(dir, "payload-manifest.json");
+            if (!File.Exists(manPath))
+            {
+                Console.WriteLine("selftest FAIL payload-manifest.json missing");
+                return 1;
+            }
+            List<string[]> pairs = ParseManifestPairs(File.ReadAllText(manPath, Encoding.UTF8));
+            if (pairs.Count == 0)
+            {
+                Console.WriteLine("selftest FAIL payload-manifest.json carries no entries");
+                return 1;
+            }
+            int verified = 0;
+            foreach (string[] pair in pairs)
+            {
+                string rel = pair[0].Replace('/', Path.DirectorySeparatorChar);
+                string full = Path.GetFullPath(Path.Combine(dir, rel));
+                string want = pair[1];
+                if (!full.StartsWith(fullDir, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+                {
+                    Console.WriteLine("manifest missing " + pair[0]);
+                    ok = false;
+                    continue;
+                }
+                string have = HashFile(full);
+                if (!string.Equals(have, want, StringComparison.OrdinalIgnoreCase))
+                {
+                    Console.WriteLine("manifest MISMATCH " + pair[0]);
+                    ok = false;
+                    continue;
+                }
+                verified++;
+            }
+            // No extra files beyond the manifest (drift visible both ways).
+            string[] onDisk = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
+            int extra = 0;
+            foreach (string f in onDisk)
+            {
+                if (string.Equals(Path.GetFileName(f), "payload-manifest.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                extra++;
+            }
+            Console.WriteLine("manifest: " + verified.ToString() + "/" + pairs.Count.ToString() + " files verified");
+            if (!ok || extra != pairs.Count || verified != pairs.Count)
+            {
+                if (extra != pairs.Count)
+                {
+                    Console.WriteLine("selftest FAIL on-disk file count " + extra.ToString() + " != manifest " + pairs.Count.ToString());
+                }
+                return 1;
+            }
             return 0;
         }
         catch (Exception ex)
@@ -312,6 +368,74 @@ static class Program
             Console.WriteLine("cli FAIL " + ex.Message);
             return 1;
         }
+    }
+
+    // Minimal manifest reader: payload-manifest.json is written by build.ps1 as
+    // {"generated": "...", "files": [{"path": "...", "sha256": "..."}, ...]}.
+    // No JSON library on this target; entries are read as ordered path/sha256
+    // pairs and every value is re-checked by the caller. Never trusts shape.
+    static List<string[]> ParseManifestPairs(string json)
+    {
+        List<string[]> pairs = new List<string[]>();
+        int i = 0;
+        while (true)
+        {
+            int kp = json.IndexOf("\"path\"", i, StringComparison.Ordinal);
+            if (kp < 0)
+            {
+                break;
+            }
+            int cp = json.IndexOf(':', kp + 6);
+            if (cp < 0)
+            {
+                break;
+            }
+            string path = ReadQuoted(json, cp + 1);
+            if (path == null)
+            {
+                break;
+            }
+            int ks = json.IndexOf("\"sha256\"", cp, StringComparison.Ordinal);
+            if (ks < 0)
+            {
+                break;
+            }
+            int cs = json.IndexOf(':', ks + 8);
+            if (cs < 0)
+            {
+                break;
+            }
+            string hash = ReadQuoted(json, cs + 1);
+            if (hash == null)
+            {
+                break;
+            }
+            pairs.Add(new string[] { path, hash });
+            i = cs + 1;
+        }
+        return pairs;
+    }
+
+    static string ReadQuoted(string json, int from)
+    {
+        int q1 = json.IndexOf('"', from);
+        if (q1 < 0)
+        {
+            return null;
+        }
+        // Manifest values come from file names and hex digests; no escape
+        // handling is needed, and an escape would fail closed below.
+        int q2 = json.IndexOf('"', q1 + 1);
+        if (q2 < 0)
+        {
+            return null;
+        }
+        string v = json.Substring(q1 + 1, q2 - q1 - 1);
+        if (v.IndexOf('\\') >= 0)
+        {
+            return null;
+        }
+        return v;
     }
 
     static string ExtractJsonValue(string json, string key)
@@ -427,6 +551,8 @@ class MainForm : Form
     private Button repairBtn;
     private Button revertBtn;
     private Button refreshBtn;
+    private Button installBtn;
+    private Button uninstallBtn;
     private Button exitBtn;
     private string toolRoot;
     private string[] ids;
@@ -545,9 +671,9 @@ class MainForm : Form
         this.toolRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "ArcIcons");
-        this.ids = new string[] { "arc", "neutral-brown", "neutral-grey", "dark-grey" };
-        this.labels = new string[] { "ARC", "Arc Neutral Brown", "Arc Neutral Grey", "Arc Dark Grey" };
-        this.themeDirs = new string[] { "Windhawk Resources", "Arc Neutral Brown\\Windhawk Resources", "Arc Neutral Grey\\Windhawk Resources", "Arc Dark Grey\\Windhawk Resources" };
+        this.ids = new string[] { "arc", "arc-symbolic", "neutral-brown", "neutral-grey", "dark-grey" };
+        this.labels = new string[] { "ARC", "ARC Symbolic", "Arc Neutral Brown", "Arc Neutral Grey", "Arc Dark Grey" };
+        this.themeDirs = new string[] { "Windhawk Resources", "ARC Symbolic\\Windhawk Resources", "Arc Neutral Brown\\Windhawk Resources", "Arc Neutral Grey\\Windhawk Resources", "Arc Dark Grey\\Windhawk Resources" };
         BuildUi();
         PreselectInstalledVariant();
         RefreshStatus();
@@ -558,7 +684,15 @@ class MainForm : Form
     // first item. Read-only: the same manifest StatusText reads.
     private void PreselectInstalledVariant()
     {
-        int idx = 3;
+        int idx = 0;
+        for (int i = 0; i < this.ids.Length; i++)
+        {
+            if (string.Equals(this.ids[i], "dark-grey", StringComparison.OrdinalIgnoreCase))
+            {
+                idx = i;
+                break;
+            }
+        }
         string vid = Program.InstalledVariantId(this.toolRoot);
         if (!string.IsNullOrEmpty(vid))
         {
@@ -654,10 +788,19 @@ class MainForm : Form
         this.exitBtn = MakeBtn("Exit", 456, top, panel, fg, false);
         this.exitBtn.Click += new EventHandler(OnExit);
 
+        // Full install / full uninstall: one click each, ending in a per-user
+        // icon-cache refresh for every logged-on profile and a VERIFY PASS.
+        this.installBtn = MakeBtn("Install all", 16, 148, accent, Color.White, true);
+        this.installBtn.Size = new Size(96, 26);
+        this.installBtn.Click += new EventHandler(OnInstall);
+        this.uninstallBtn = MakeBtn("Uninstall all", 120, 148, panel, fg, false);
+        this.uninstallBtn.Size = new Size(96, 26);
+        this.uninstallBtn.Click += new EventHandler(OnUninstall);
+
         // The log is a strip, shut by default - no permanent empty void.
         this.detailsBtn = new Button();
         this.detailsBtn.Text = "Details \u25B8";
-        this.detailsBtn.Location = new Point(16, 156);
+        this.detailsBtn.Location = new Point(224, 148);
         this.detailsBtn.Size = new Size(96, 26);
         this.detailsBtn.FlatStyle = FlatStyle.Flat;
         this.detailsBtn.BackColor = panel;
@@ -783,6 +926,8 @@ class MainForm : Form
         this.repairBtn.Enabled = en;
         this.revertBtn.Enabled = en;
         this.refreshBtn.Enabled = en;
+        this.installBtn.Enabled = en;
+        this.uninstallBtn.Enabled = en;
         this.variantBox.Enabled = en;
     }
 
@@ -807,6 +952,8 @@ class MainForm : Form
     private void OnRepair(object s, EventArgs e) { RunAction("repair"); }
     private void OnRevert(object s, EventArgs e) { RunAction("revert"); }
     private void OnRefresh(object s, EventArgs e) { RunAction("refresh"); }
+    private void OnInstall(object s, EventArgs e) { RunAction("install"); }
+    private void OnUninstall(object s, EventArgs e) { RunAction("uninstall"); }
     private void OnExit(object s, EventArgs e) { this.Close(); }
 
     private void RunAction(string action)

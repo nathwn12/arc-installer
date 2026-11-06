@@ -2,8 +2,13 @@
 # Read-only check: state.json + manifests vs the live SystemResources files.
 # Manifest completeness is enforced first: an empty or missing manifest is
 # always FAIL, never PASS; exactly three UNIQUE allowlisted basenames are
-# required. The state.json mode must be one of
-# installed|original|partial|drifted; anything else is FAIL.
+# required. Every baseline row must carry originalSha256 (64 hex) and
+# originalPath; every installed-manifest row must carry mergedSha256 (64 hex)
+# and stagePath. A missing field is a NAMED FAIL, never an INFO note that a
+# low-confidence hash classification then passes over. The state.json mode must
+# be one of installed|original|partial|drifted; anything else is FAIL, and an
+# absent mode is FAIL when installed-manifest.json exists (a merge was
+# recorded, so mode=original cannot be assumed).
 # Per file: live sha256 == recorded hash for the current mode; baseline owner
 # + complete DACL semantics (protection flag + ACE set, via full SDDL compare
 # with a semantic breakdown on mismatch) on BOTH the live path AND every
@@ -66,16 +71,43 @@ catch { Write-Output ("ARC-ICONS-VERIFY: FAIL manifest completeness: {0}" -f $_)
 $baseline = @{}
 foreach ($b in $origMan.files) { $baseline[[string]$b.name] = $b }
 
+# ---- F6: baseline rows must carry their own hash + path, in EVERY mode ----
+# A row without originalSha256 previously fell through to the INFO branch below
+# ("no single expected hash"), so a manifest that omitted the field could still
+# reach PASS. Missing is a named FAIL, never INFO.
+foreach ($b in $origMan.files) {
+  $bn = [string]$b.name
+  $oh = ([string]$b.originalSha256).Trim()
+  if (-not $oh) {
+    $failures += ("{0}: baseline row has no originalSha256." -f $bn)
+    Write-Output ("  [manifest] FAIL {0}: baseline originalSha256 missing" -f $bn)
+  } elseif ($oh -notmatch '^[0-9A-Fa-f]{64}$') {
+    $failures += ("{0}: baseline originalSha256 '{1}' is not a 64-hex SHA-256." -f $bn, $oh)
+    Write-Output ("  [manifest] FAIL {0}: baseline originalSha256 malformed" -f $bn)
+  }
+  if (-not ([string]$b.originalPath).Trim()) {
+    $failures += ("{0}: baseline row has no originalPath." -f $bn)
+    Write-Output ("  [manifest] FAIL {0}: baseline originalPath missing" -f $bn)
+  }
+}
+
 # ---- F6: mode enum ----
 $mode = 'original'
+$modeDeclared = $false
 $statePath = Join-Path $RootC 'state.json'
 if (Test-Path -LiteralPath $statePath -PathType Leaf) {
   try {
     $state = Read-ArcIconsJsonFile $statePath
-    if ([string]$state.mode) { $mode = [string]$state.mode }
+    if ([string]$state.mode) { $mode = [string]$state.mode; $modeDeclared = $true }
   } catch { $failures += ("state.json unreadable: {0}." -f $_) }
 } else {
-  $notes += 'state.json absent; assuming mode=original.'
+  $notes += 'state.json absent; assuming mode=original (FAILs below if an installed manifest exists).'
+}
+$instManPath = Join-Path $RootC 'installed-manifest.json'
+$instManPresent = Test-Path -LiteralPath $instManPath -PathType Leaf
+if ((-not $modeDeclared) -and $instManPresent) {
+  $failures += 'installed-manifest.json exists but state.json declares no mode: inconsistent state (a merge was recorded), so mode=original cannot be assumed; re-run apply.ps1 or restore.ps1 to rewrite state.json, then re-verify.'
+  Write-Output '  [state] FAIL installed-manifest.json present with no declared mode'
 }
 $validModes = @('installed', 'original', 'partial', 'drifted')
 if ($validModes -notcontains $mode) {
@@ -88,15 +120,40 @@ if ($mode -eq 'drifted') { $failures += 'mode=drifted: a live payload is unknown
 $merged = @{}
 $instMan = $null
 if ($mode -eq 'installed') {
-  $instManPath = Join-Path $RootC 'installed-manifest.json'
-  if (-not (Test-Path -LiteralPath $instManPath -PathType Leaf)) {
+  if (-not $instManPresent) {
     $failures += 'mode=installed but installed-manifest.json not found.'
   } else {
     try {
       $instMan = Read-ArcIconsJsonFile $instManPath
       try { Assert-ArcIconsInstalledManifest $instMan }
       catch { $failures += ("installed-manifest completeness: {0}" -f $_) }
-      foreach ($f in @($instMan.files)) { if ($f) { $merged[[string]$f.name] = $f } }
+      # Every installed row must name its own merged hash and stage file: a row
+      # that omits either cannot be verified, and skipping the comparison is a
+      # silent PASS. Each gap is its own named FAIL.
+      foreach ($f in @($instMan.files)) {
+        if (-not $f) { continue }
+        $fn = [string]$f.name
+        $mh = ([string]$f.mergedSha256).Trim()
+        if (-not $mh) {
+          $failures += ("{0}: installed-manifest row has no mergedSha256." -f $fn)
+          Write-Output ("  [manifest] FAIL {0}: installed mergedSha256 missing" -f $fn)
+        } elseif ($mh -notmatch '^[0-9A-Fa-f]{64}$') {
+          $failures += ("{0}: installed-manifest mergedSha256 '{1}' is not a 64-hex SHA-256." -f $fn, $mh)
+          Write-Output ("  [manifest] FAIL {0}: installed mergedSha256 malformed" -f $fn)
+        }
+        $sp = ([string]$f.stagePath).Trim()
+        if (-not $sp) {
+          $failures += ("{0}: installed-manifest row has no stagePath." -f $fn)
+          Write-Output ("  [manifest] FAIL {0}: installed stagePath missing" -f $fn)
+        } else {
+          try { [void](Resolve-ArcIconsRootChildPath $RootC $sp ("{0}: stagePath" -f $fn)) }
+          catch {
+            $failures += ("{0}: installed-manifest stagePath refused: {1}" -f $fn, $_)
+            Write-Output ("  [manifest] FAIL {0}: installed stagePath refused" -f $fn)
+          }
+        }
+        $merged[$fn] = $f
+      }
       $builtTheme = ''
       $builtSrc = ''
       if ($instMan.PSObject.Properties['theme']) { $builtTheme = [string]$instMan.theme }
@@ -122,19 +179,29 @@ foreach ($b in $origMan.files) {
   $want = $null
   $wantKind = $null
   if ($mode -eq 'installed') {
-    if ($merged[$name]) { $want = ([string]$merged[$name].mergedSha256).ToUpperInvariant(); $wantKind = 'merged' }
+    if ($merged.ContainsKey($name)) {
+      $mh = ([string]$merged[$name].mergedSha256).Trim().ToUpperInvariant()
+      if ($mh) { $want = $mh; $wantKind = 'merged' }
+    } else {
+      $failures += ("{0}: installed manifest carries no row for this payload (no mergedSha256 to match)." -f $name)
+    }
   } elseif ($mode -eq 'original') {
-    $want = ([string]$b.originalSha256).ToUpperInvariant(); $wantKind = 'original'
+    $oh = ([string]$b.originalSha256).Trim().ToUpperInvariant()
+    if ($oh) { $want = $oh; $wantKind = 'original' }
   }
   try { $liveHash = Get-ArcIconsSha256 $live }
   catch { $failures += "${name}: live hash unreadable."; Write-Output '  [hash] UNREADABLE'; continue }
   if ($want) {
     if ($liveHash -eq $want) { Write-Output ("  [hash] OK {0} == {1} ({2})" -f $liveHash, $want, $wantKind) }
     else { $failures += ("{0}: live hash {1} != recorded {2} ({3}, mode={4})." -f $name, $liveHash, $want, $wantKind, $mode); Write-Output ("  [hash] MISMATCH live={0} want={1}" -f $liveHash, $want) }
+  } elseif (($mode -eq 'installed') -or ($mode -eq 'original')) {
+    # no expected hash in a mode that requires one: already a named FAIL above;
+    # never print INFO here, which used to read as a soft pass.
+    Write-Output ("  [hash] FAIL no recorded expected hash for mode={0} (named FAIL above)." -f $mode)
   } else {
     $cls = 'unknown'
     if ($liveHash -eq ([string]$b.originalSha256).ToUpperInvariant()) { $cls = 'original' }
-    elseif ($merged[$name] -and ($liveHash -eq ([string]$merged[$name].mergedSha256).ToUpperInvariant())) { $cls = 'merged' }
+    elseif ($merged.ContainsKey($name) -and ($liveHash -eq ([string]$merged[$name].mergedSha256).ToUpperInvariant())) { $cls = 'merged' }
     Write-Output ("  [hash] INFO live={0} class={1} (mode={2}; no single expected hash)." -f $liveHash, $cls, $mode)
   }
 

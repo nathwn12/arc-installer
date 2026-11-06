@@ -1,7 +1,7 @@
 ﻿# Merge-IconTheme.ps1 — merge a selectable ARC (by niivu) theme variant into
 # copies of the pristine .mun originals using the Win32 resource-update API only.
 # Params: -Build (default) | -Verify | -Root (default (Join-Path $env:ProgramData 'ArcIcons')) |
-#         -Pair <name> | -Variant <arc|neutral-brown|neutral-grey|dark-grey>
+#         -Pair <name> | -Variant <arc|arc-symbolic|neutral-brown|neutral-grey|dark-grey>
 # -Variant picks the theme source directory AND the label recorded in
 # installed-manifest.json (theme + per-file themeFile + variantSource), so the
 # whole build/apply/verify pipeline stays pinned to the variant it built.
@@ -34,6 +34,7 @@ if ($Root -like 'C:\Windows*') { throw "Refusing to use a Root under C:\Windows 
 # ---- variant selection: one table owns the theme dir + the manifest label ----
 $VariantTable = [ordered]@{
     'arc'           = [pscustomobject]@{ Id = 'arc';           Display = 'ARC (by niivu)';    ThemeDir = 'Windhawk Resources';                   Archive = 'ARC.zip' }
+    'arc-symbolic'  = [pscustomobject]@{ Id = 'arc-symbolic';  Display = 'ARC Symbolic';      ThemeDir = 'ARC Symbolic\Windhawk Resources';      Archive = 'ARC Symbolic.zip' }
     'neutral-brown' = [pscustomobject]@{ Id = 'neutral-brown'; Display = 'Arc Neutral Brown'; ThemeDir = 'Arc Neutral Brown\Windhawk Resources';  Archive = 'arc-neutral-brown.zip' }
     'neutral-grey'  = [pscustomobject]@{ Id = 'neutral-grey';  Display = 'Arc Neutral Grey';  ThemeDir = 'Arc Neutral Grey\Windhawk Resources';   Archive = 'arc-neutral-grey.zip' }
     'dark-grey'     = [pscustomobject]@{ Id = 'dark-grey';     Display = 'Arc Dark Grey';     ThemeDir = 'Arc Dark Grey\Windhawk Resources';      Archive = '' }
@@ -43,6 +44,7 @@ function Resolve-VariantKey([string]$Name) {
     $key = $key.Trim('-')
     $alias = @{
         'arc' = 'arc'; 'arc-by-niivu' = 'arc'; 'niivu' = 'arc'; 'default' = 'arc'
+        'arc-symbolic' = 'arc-symbolic'; 'symbolic' = 'arc-symbolic'
         'neutral-brown' = 'neutral-brown'; 'arc-neutral-brown' = 'neutral-brown'; 'brown' = 'neutral-brown'
         'neutral-grey' = 'neutral-grey'; 'arc-neutral-grey' = 'neutral-grey'; 'grey' = 'neutral-grey'
         'gray' = 'neutral-grey'; 'neutral-gray' = 'neutral-grey'; 'arc-neutral-gray' = 'neutral-grey'
@@ -315,26 +317,44 @@ function Invoke-MergePair($PairName, $ThemeFile) {
     $themeGroups = @($themeRes | Where-Object { $_.TypeForm -eq '#14' })
 
     # --- collision safety: theme icon ordinals referenced by untouched dest groups ---
+    # A group directory entry declares the byte length of the RT_ICON it names, so
+    # substituting theme bytes under an ordinal an untouched group already points
+    # at is only safe when the length is identical. When it is not, that group is
+    # left declaring a stale size (measured on imageres: 7 stock groups / 27
+    # entries) and the icon renderer slices the wrong bytes, so the theme icon is
+    # moved to a fresh ordinal and every theme group that names it follows.
+    #
+    # NB: Get-GrpIconIds returns [uint16] (BitConverter), while NameInt is
+    # [int]; a Hashtable does not consider [uint16]289 and [int]289 the same key
+    # (measured), so both sides are cast to [int] or the remap silently never
+    # fires.
     $untouched = @($dest.Groups.Keys | Where-Object { -not (Test-IsThemeGroup $_ $themeGroups) })
     $protected = @{}
     foreach ($g in $untouched) {
-        foreach ($id in (Get-GrpIconIds $dest.Groups[$g])) { $protected[$id] = $true }
+        foreach ($id in (Get-GrpIconIds $dest.Groups[$g])) { $protected[[int]$id] = $true }
+    }
+    $destIconLen = @{}
+    foreach ($e in $destRes) {
+        if ($e.TypeForm -eq '#3' -and $e.NameIsInt) { $destIconLen[[int]$e.NameInt] = [uint32]$e.Data.Length }
     }
     $used = @{}
-    foreach ($k in $dest.IconOrds.Keys) { $used[$k] = $true }
-    foreach ($e in $themeIcons) { if ($e.NameIsInt) { $used[$e.NameInt] = $true } }
+    foreach ($k in $dest.IconOrds.Keys) { $used[[int]$k] = $true }
+    foreach ($e in $themeIcons) { if ($e.NameIsInt) { $used[[int]$e.NameInt] = $true } }
     $maxUsed = 0
     foreach ($k in $used.Keys) { if ($k -gt $maxUsed) { $maxUsed = $k } }
     $remap = @{}
     foreach ($e in $themeIcons) {
         if (-not $e.NameIsInt) { continue }
-        $id = $e.NameInt
-        if ($protected.ContainsKey($id) -and -not $remap.ContainsKey($id)) {
-            do { $maxUsed++ } while ($used.ContainsKey($maxUsed))
-            if ($maxUsed -gt 65535) { throw "Ordinal space exhausted while remapping icon #$id." }
-            $used[$maxUsed] = $true
-            $remap[$id] = $maxUsed
-        }
+        $id = [int]$e.NameInt
+        if (-not $protected.ContainsKey($id)) { continue }
+        if ($remap.ContainsKey($id)) { continue }
+        # same byte length: the untouched group's declaration stays true, so the
+        # theme art can take the ordinal in place (no duplication in the payload)
+        if ($destIconLen.ContainsKey($id) -and $destIconLen[$id] -eq [uint32]$e.Data.Length) { continue }
+        do { $maxUsed++ } while ($used.ContainsKey($maxUsed))
+        if ($maxUsed -gt 65535) { throw "Ordinal space exhausted while remapping icon #$id." }
+        $used[$maxUsed] = $true
+        $remap[$id] = $maxUsed
     }
     foreach ($ge in $themeGroups) {
         foreach ($old in $remap.Keys) { Set-GrpIconId $ge.Data $old $remap[$old] }
@@ -368,11 +388,11 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         # language, using only the Win32 resource API.
         $themeOverlay = @{}
         foreach ($e in $themeIcons) {
-            $nm = if ($e.NameIsInt -and $remap.ContainsKey($e.NameInt)) { '#' + $remap[$e.NameInt] } else { $e.NameForm }
-            $themeOverlay["#3|$nm"] = @{ TypeForm = '#3'; TypeIsInt = $true; Data = $e.Data; NameForm = $nm; NameIsInt = $true }
+            $nm = if ($e.NameIsInt -and $remap.ContainsKey([int]$e.NameInt)) { '#' + $remap[[int]$e.NameInt] } else { $e.NameForm }
+            $themeOverlay["#3|$nm"] = @{ TypeForm = '#3'; TypeIsInt = $true; Data = $e.Data; NameForm = $nm; NameIsInt = $true; Lang = [uint16]$e.Lang }
         }
         foreach ($ge in $themeGroups) {
-            $themeOverlay["#14|$($ge.NameForm)"] = @{ TypeForm = '#14'; TypeIsInt = $true; Data = $ge.Data; NameForm = $ge.NameForm; NameIsInt = [bool]$ge.NameIsInt }
+            $themeOverlay["#14|$($ge.NameForm)"] = @{ TypeForm = '#14'; TypeIsInt = $true; Data = $ge.Data; NameForm = $ge.NameForm; NameIsInt = [bool]$ge.NameIsInt; Lang = [uint16]$ge.Lang }
         }
         $coveredTN = @{}
         $ops = New-Object System.Collections.ArrayList
@@ -398,8 +418,12 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         foreach ($tn in $themeOverlay.Keys) {
             if ($coveredTN.ContainsKey($tn)) { continue }
             $ov = $themeOverlay[$tn]
-            $tlang = if ($dest.DestLang.ContainsKey($tn)) { [uint16]$dest.DestLang[$tn] } else { $LangDefault }
-            [void]$ops.Add(@{ TypeForm = $ov.TypeForm; TypeIsInt = $ov.TypeIsInt; NameForm = $ov.NameForm; NameIsInt = $ov.NameIsInt; Lang = $tlang; Data = $ov.Data; Op = "theme-add $tn lang $tlang" })
+            # A remapped icon has no dest entry at its new ordinal, so it lands
+            # under the language the theme itself carries, not a guessed one.
+            $tlang = $LangDefault
+            if ($dest.DestLang.ContainsKey($tn)) { $tlang = [uint16]$dest.DestLang[$tn] }
+            elseif ($ov.ContainsKey('Lang')) { $tlang = [uint16]$ov.Lang }
+            [void]$ops.Add(@{ TypeForm = $ov.TypeForm; TypeIsInt = $ov.TypeIsInt; NameForm = $ov.NameForm; NameIsInt = $ov.NameIsInt; Lang = [uint16]$tlang; Data = $ov.Data; Op = "theme-add $tn lang $tlang" })
         }
         foreach ($op in $muiOps) { [void]$ops.Add($op) }
         $chunks = New-Object System.Collections.ArrayList
@@ -489,6 +513,86 @@ function Test-IsThemeGroup($Name, $ThemeGroupEntries) {
     return $false
 }
 
+# GRPICONDIR directory entries as fields, so a group can be compared field by
+# field instead of byte for byte (a collision remap changes the nID field only).
+function Get-GroupEntryList([byte[]]$b) {
+    $list = New-Object System.Collections.ArrayList
+    if ($b.Length -lt 6) { return ,$list }
+    $count = [BitConverter]::ToUInt16($b, 4)
+    for ($i = 0; $i -lt $count; $i++) {
+        $off = 6 + $i * 14
+        if ($off + 14 -gt $b.Length) { return ,$list }
+        [void]$list.Add([pscustomobject]@{
+            W = [int]$b[$off]; H = [int]$b[$off + 1]; Colors = [int]$b[$off + 2]; Reserved = [int]$b[$off + 3]
+            Planes = [BitConverter]::ToUInt16($b, $off + 4); Bits = [BitConverter]::ToUInt16($b, $off + 6)
+            Bytes = [BitConverter]::ToUInt32($b, $off + 8); Id = [int][BitConverter]::ToUInt16($b, $off + 12)
+        })
+    }
+    return ,$list
+}
+
+# True only when a merged group differs from the theme group for one reason: the
+# nID of an entry was rewritten by the collision remap. Every other directory
+# field must be identical, and the merged icon behind the new nID must be exactly
+# as long as the theme entry declares - so a moved group cannot smuggle in a
+# wrong-size (or truncated) image.
+function Test-GroupRemapAllowed([byte[]]$mergedBytes, [byte[]]$themeBytes, [uint16]$lang, $iconLen) {
+    if ($null -eq $mergedBytes -or $null -eq $themeBytes) { return $false }
+    if ($mergedBytes.Length -ne $themeBytes.Length) { return $false }
+    if ($mergedBytes.Length -lt 6) { return $false }
+    for ($i = 0; $i -lt 6; $i++) { if ($mergedBytes[$i] -ne $themeBytes[$i]) { return $false } }
+    $a = Get-GroupEntryList $mergedBytes
+    $b = Get-GroupEntryList $themeBytes
+    if ($a.Count -ne $b.Count -or $a.Count -eq 0) { return $false }
+    $moved = 0
+    for ($i = 0; $i -lt $b.Count; $i++) {
+        $x = $a[$i]; $y = $b[$i]
+        if ($x.W -ne $y.W -or $x.H -ne $y.H -or $x.Colors -ne $y.Colors -or $x.Reserved -ne $y.Reserved -or
+            $x.Planes -ne $y.Planes -or $x.Bits -ne $y.Bits -or $x.Bytes -ne $y.Bytes) { return $false }
+        if ($x.Id -ne $y.Id) {
+            $key = "#$($x.Id)|$lang"
+            if (-not $iconLen.ContainsKey($key)) { return $false }
+            if ([uint32]$iconLen[$key] -ne [uint32]$y.Bytes) { return $false }
+            $moved++
+        }
+    }
+    return ($moved -gt 0)
+}
+
+# A stock group (one the theme does not provide) keeps the original directory
+# verbatim, so every entry must still declare the byte length of the RT_ICON it
+# names - that is what a length-changing substitution breaks (measured on the
+# pre-fix dark-grey merge: 27 entries across 7 stock groups). Theme-provided
+# groups are exempt: their declarations are reproduced from the theme byte for
+# byte, and the upstream ARC payload declares a few entries against renumbered
+# icons (measured: arc theme group #17 declares 74792 for a 969-byte icon), which
+# the merge must neither "fix" nor fail on.
+function Get-GroupSizeIssues($Entries, $ThemeGroupNames, [int]$limit) {
+    $iconLen = @{}
+    foreach ($ent in $Entries) {
+        if ($ent.TypeForm -eq '#3') { $iconLen["$($ent.NameForm)|$($ent.Lang)"] = [uint32]$ent.Data.Length }
+    }
+    $checked = 0
+    $bad = @()
+    foreach ($ent in $Entries) {
+        if ($ent.TypeForm -ne '#14') { continue }
+        if ($ThemeGroupNames.ContainsKey($ent.NameForm)) { continue }
+        $b = $ent.Data
+        if ($b.Length -lt 6) { continue }
+        $count = [BitConverter]::ToUInt16($b, 4)
+        for ($i = 0; $i -lt $count; $i++) {
+            $off = 6 + $i * 14
+            if ($off + 14 -gt $b.Length) { continue }
+            $key = '#' + [BitConverter]::ToUInt16($b, $off + 12) + '|' + $ent.Lang
+            if (-not $iconLen.ContainsKey($key)) { continue }
+            $checked++
+            $decl = [BitConverter]::ToUInt32($b, $off + 8)
+            if ($decl -ne $iconLen[$key] -and $bad.Count -lt $limit) { $bad += "$($ent.NameForm)#$i(declares $decl actual $($iconLen[$key]))" }
+        }
+    }
+    return @{ Checked = $checked; Bad = $bad }
+}
+
 function Test-PairInvariants($PairName, $ThemeFile) {
     # Strict byte checks: (a) superset, (b) theme groups identical, (c) untouched identical.
     # NOTE: if collision remap rewrote theme groups, (b) reports which groups differ.
@@ -500,24 +604,38 @@ function Test-PairInvariants($PairName, $ThemeFile) {
     if (-not (Test-Path -LiteralPath $stage)) {
         return @{ Ok = $false; Lines = @("CHECK stage-exists: FAIL ($PairName not built)") }
     }
-    $o = Get-IconMaps ([ArcResMerge]::Read($orig))
-    $m = Get-IconMaps ([ArcResMerge]::Read($stage))
+    $oEntries = [ArcResMerge]::Read($orig)
+    $mEntries = [ArcResMerge]::Read($stage)
     $t = [ArcResMerge]::Read($theme)
+    $o = Get-IconMaps $oEntries
+    $m = Get-IconMaps $mEntries
     $tGroups = @{}
+    $tGroupLang = @{}
     foreach ($e in ($t | Where-Object { $_.TypeForm -eq '#14' })) {
-        if (-not $tGroups.ContainsKey($e.NameForm)) { $tGroups[$e.NameForm] = $e.Data }
+        if (-not $tGroups.ContainsKey($e.NameForm)) { $tGroups[$e.NameForm] = $e.Data; $tGroupLang[$e.NameForm] = [uint16]$e.Lang }
     }
+    $mIconLen = @{}
+    foreach ($e in $mEntries) { if ($e.TypeForm -eq '#3') { $mIconLen["$($e.NameForm)|$($e.Lang)"] = [uint32]$e.Data.Length } }
 
     $missing = @($o.Groups.Keys | Where-Object { -not $m.Groups.ContainsKey($_) })
     if ($missing.Count -eq 0) { $lines += "CHECK ${PairName} group-superset: PASS (original $($o.Groups.Count), merged $($m.Groups.Count))" }
     else { $lines += "CHECK ${PairName} group-superset: FAIL (missing $($missing.Count): $($missing -join ','))"; $ok = $false }
 
     $badT = @()
+    $remappedGroups = @()
     foreach ($n in $tGroups.Keys) {
         if (-not $m.Groups.ContainsKey($n)) { $badT += "$n(absent)"; continue }
-        if (-not [ArcResMerge]::BytesEqual($m.Groups[$n], $tGroups[$n])) { $badT += $n }
+        if ([ArcResMerge]::BytesEqual($m.Groups[$n], $tGroups[$n])) { continue }
+        # A theme group the collision remap rewrote differs in its nID fields
+        # only; anything else is a real divergence and still fails.
+        if (Test-GroupRemapAllowed $m.Groups[$n] $tGroups[$n] $tGroupLang[$n] $mIconLen) { $remappedGroups += $n; continue }
+        $badT += $n
     }
-    if ($badT.Count -eq 0) { $lines += "CHECK ${PairName} theme-groups-identical: PASS ($($tGroups.Count)/$($tGroups.Count))" }
+    if ($badT.Count -eq 0) {
+        $remapNote = ''
+        if ($remappedGroups.Count -gt 0) { $remapNote = ", $($remappedGroups.Count) via collision remap" }
+        $lines += "CHECK ${PairName} theme-groups-identical: PASS ($($tGroups.Count)/$($tGroups.Count)$remapNote)"
+    }
     else { $lines += "CHECK ${PairName} theme-groups-identical: FAIL ($($tGroups.Count - $badT.Count)/$($tGroups.Count) match; differ: $($badT -join ','))"; $ok = $false }
 
     $badO = @()
@@ -527,6 +645,10 @@ function Test-PairInvariants($PairName, $ThemeFile) {
     }
     if ($badO.Count -eq 0) { $lines += "CHECK ${PairName} original-groups-preserved: PASS" }
     else { $lines += "CHECK ${PairName} original-groups-preserved: FAIL (differ: $($badO -join ','))"; $ok = $false }
+
+    $sizeCheck = Get-GroupSizeIssues $mEntries $tGroups 6
+    if ($sizeCheck.Bad.Count -eq 0) { $lines += "CHECK ${PairName} stock-group-sizes: PASS ($($sizeCheck.Checked) stock-group directory entries declare their RT_ICON length)" }
+    else { $lines += "CHECK ${PairName} stock-group-sizes: FAIL ($($sizeCheck.Bad -join ','))"; $ok = $false }
 
     try {
         $probe1 = [ArcResMerge]::Read($stage) | ForEach-Object { $_.TypeForm } | Sort-Object -Unique
@@ -666,10 +788,33 @@ if ($Pair) {
 $sourceOrigin = [ordered]@{ sourceDir = $ThemeRel }
 $sourceOrigin['files'] = $originFiles
 $zipCandidate = Join-Path $Root ("theme\{0}" -f $VariantInfo.Archive)
-if (Test-Path -LiteralPath $zipCandidate -PathType Leaf) {
+if ($VariantInfo.Archive -and (Test-Path -LiteralPath $zipCandidate -PathType Leaf)) {
     $sourceOrigin['archive'] = [ordered]@{
         name   = (Split-Path -Leaf $zipCandidate)
         sha256 = (Get-FileHash -LiteralPath $zipCandidate -Algorithm SHA256).Hash
+    }
+} elseif ($VariantInfo.Archive) {
+    # The landed archive is usually NOT under theme\ (fetch caches zips in
+    # staging\theme-cache and build never ships them). Fall back to the
+    # fetch-time pin in theme\source.json - recorded provenance, not invention:
+    # only the name + sha256 fetch pinned are recorded, and only when readable.
+    $fetchProvenance = Join-Path $Root 'theme\source.json'
+    if (Test-Path -LiteralPath $fetchProvenance -PathType Leaf) {
+        try {
+            $fp = Get-Content -LiteralPath $fetchProvenance -Raw | ConvertFrom-Json
+            $fh = $null
+            if ($fp.sha256 -and $fp.sha256.PSObject.Properties[$VariantInfo.Archive]) { $fh = [string]$fp.sha256.($VariantInfo.Archive) }
+            if ($fh) {
+                $sourceOrigin['archive'] = [ordered]@{
+                    name   = $VariantInfo.Archive
+                    sha256 = $fh
+                    via    = 'theme\source.json (fetch-time pin; archive file not present)'
+                }
+            }
+            if (-not $sourceOrigin.Contains('repo') -and $fp.PSObject.Properties['repo'] -and [string]$fp.repo) {
+                $sourceOrigin['repo'] = [string]$fp.repo
+            }
+        } catch { Write-Output ("WARN source.json unreadable; archive/repo not recorded: {0}" -f $_) }
     }
 }
 $originSidecar = Join-Path $ThemeDirAbs 'source.json'

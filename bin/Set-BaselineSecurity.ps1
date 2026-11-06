@@ -9,8 +9,11 @@
 #  - WinSxS sibling resolution via `fsutil hardlink list` (caller captures the
 #    sibling BEFORE mutating, because takeown touches the shared inode);
 #  - the atomic logs\ArcIcons.lock protocol (CreateNew + stale timeout);
-#  - the shell guarantee: icon-cache refresh = delete iconcache*.db + verified
-#    explorer restart, plus Restore-ArcIconsShell for every exit path;
+#  - the shell guarantee: per-user icon-cache refresh (every logged-on profile:
+#    iconcache*.db AND thumbcache*.db, ie4uinit -show, verified explorer
+#    restart in that profile's own session) plus Restore-ArcIconsShell for every
+#    exit path. The multi-user engine lives in bin\ArcIcons-UserRefresh.ps1 and
+#    is dot-sourced at the END of this file (it calls helpers defined here).
 #  - manifest allowlist validation, path canonicalization/confinement,
 #    hashing and journal appends.
 # Windows PowerShell 5.1 compatible (no ?. / ?? / ternary).
@@ -133,6 +136,7 @@ function Get-ArcIconsVariantInfo([string]$Name) {
   $key = $key.Trim('-')
   $alias = @{
     'arc' = 'arc'; 'arc-by-niivu' = 'arc'; 'niivu' = 'arc'; 'default' = 'arc'
+    'arc-symbolic' = 'arc-symbolic'; 'symbolic' = 'arc-symbolic'
     'neutral-brown' = 'neutral-brown'; 'arc-neutral-brown' = 'neutral-brown'; 'brown' = 'neutral-brown'
     'neutral-grey' = 'neutral-grey'; 'arc-neutral-grey' = 'neutral-grey'; 'grey' = 'neutral-grey'
     'gray' = 'neutral-grey'; 'neutral-gray' = 'neutral-grey'; 'arc-neutral-gray' = 'neutral-grey'
@@ -141,6 +145,7 @@ function Get-ArcIconsVariantInfo([string]$Name) {
   if (-not $alias.ContainsKey($key)) { return $null }
   $id = $alias[$key]
   if ($id -eq 'arc') { return [pscustomobject]@{ Id = 'arc'; Display = 'ARC (by niivu)'; ThemeDir = 'Windhawk Resources' } }
+  if ($id -eq 'arc-symbolic') { return [pscustomobject]@{ Id = 'arc-symbolic'; Display = 'ARC Symbolic'; ThemeDir = 'ARC Symbolic\Windhawk Resources' } }
   if ($id -eq 'neutral-brown') { return [pscustomobject]@{ Id = 'neutral-brown'; Display = 'Arc Neutral Brown'; ThemeDir = 'Arc Neutral Brown\Windhawk Resources' } }
   if ($id -eq 'neutral-grey') { return [pscustomobject]@{ Id = 'neutral-grey'; Display = 'Arc Neutral Grey'; ThemeDir = 'Arc Neutral Grey\Windhawk Resources' } }
   return [pscustomobject]@{ Id = 'dark-grey'; Display = 'Arc Dark Grey'; ThemeDir = 'Arc Dark Grey\Windhawk Resources' }
@@ -167,11 +172,12 @@ function Invoke-ArcIconsOriginalsCapture([string]$RootC, [string]$SysC, $Variant
     [pscustomobject]@{ Mun = 'imagesp1.dll.mun'; Dll = 'imagesp1.dll' },
     [pscustomobject]@{ Mun = 'zipfldr.dll.mun'; Dll = 'zipfldr.dll' }
   )
-  # themeOrigin provenance: arc + both neutrals ship from niivu's
+  # themeOrigin provenance: arc + arc-symbolic + both neutrals ship from niivu's
   # resource-redirect repo (archive name from the landed theme dir, same repo
   # the live manifest records); dark-grey is generated on this PC.
   $origin = 'generated on this PC by bin\Recolor-IconTheme.ps1; see theme\Arc Dark Grey\NOTES.md'
   if ($VariantInfo.Id -eq 'arc') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/ARC.zip' }
+  if ($VariantInfo.Id -eq 'arc-symbolic') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/ARC Symbolic.zip' }
   if ($VariantInfo.Id -eq 'neutral-brown') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/arc-neutral-brown.zip' }
   if ($VariantInfo.Id -eq 'neutral-grey') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/arc-neutral-grey.zip' }
   $origDir = Join-Path $RootC 'originals'
@@ -865,72 +871,77 @@ function Test-ArcIconsInteractiveSession([int]$SessionId) {
   return ($SessionId -ne 0)
 }
 
-function Start-ArcIconsExplorer([int]$TimeoutSec = 20) {
+function Start-ArcIconsExplorer([int]$TimeoutSec = 20, [int]$SessionId = -1) {
   $exe = Join-Path $env:SystemRoot 'explorer.exe'
+  $mySession = (Get-Process -Id $PID).SessionId
+  if (($SessionId -ge 0) -and ($SessionId -ne $mySession)) {
+    # Start-Process cannot create a process in another session; the multi-user
+    # engine uses an interactive scheduled task for that. Say so, never fake it.
+    return [pscustomobject]@{ Running = $false; Pids = @(); SessionIds = @(); Note = ("cannot start explorer in session {0} from session {1}" -f $SessionId, $mySession) }
+  }
   for ($attempt = 1; $attempt -le 2; $attempt++) {
-    if (@(Get-Process -Name explorer -ErrorAction SilentlyContinue).Count -gt 0) { break }
+    $have = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { ($SessionId -lt 0) -or ($_.SessionId -eq $SessionId) })
+    if ($have.Count -gt 0) { break }
     try { Start-Process -FilePath $exe -ErrorAction Stop } catch { }
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while (((@(Get-Process -Name explorer -ErrorAction SilentlyContinue)).Count -eq 0) -and ((Get-Date) -lt $deadline)) {
+    while (((@(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { ($SessionId -lt 0) -or ($_.SessionId -eq $SessionId) })).Count -eq 0) -and ((Get-Date) -lt $deadline)) {
       Start-Sleep -Milliseconds 250
     }
   }
-  $p = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Sort-Object Id)
+  $p = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { ($SessionId -lt 0) -or ($_.SessionId -eq $SessionId) } | Sort-Object Id)
   if ($p.Count -eq 0) {
-    return [pscustomobject]@{ Running = $false; Pids = @(); Note = ("explorer.exe STILL NOT RUNNING after 2 x {0}s" -f $TimeoutSec) }
+    return [pscustomobject]@{ Running = $false; Pids = @(); SessionIds = @(); Note = ("explorer.exe STILL NOT RUNNING after 2 x {0}s" -f $TimeoutSec) }
   }
   $ids = @($p | ForEach-Object { $_.Id })
   $sess = @($p | ForEach-Object { $_.SessionId } | Sort-Object -Unique)
-  return [pscustomobject]@{ Running = $true; Pids = $ids; Note = ("explorer running pid(s)=" + ($ids -join ',') + " session(s)=" + ($sess -join ',')) }
+  return [pscustomobject]@{ Running = $true; Pids = $ids; SessionIds = $sess; Note = ("explorer running pid(s)=" + ($ids -join ',') + " session(s)=" + ($sess -join ',')) }
 }
 
 # Safe on EVERY exit path — success, failure, refusal, interrupt: it acts only
-# when the shell is actually down, and reports what it saw either way.
+# when the CALLER'S OWN session has no explorer (a session-0 or other-session
+# caller must not claim it restored a shell it cannot reach), and reports what
+# it saw either way.
 function Restore-ArcIconsShell([string]$Where) {
-  $p = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
-  if ($p.Count -gt 0) {
-    return ("shell guard [{0}]: explorer already running pid(s)={1} session(s)={2}" -f $Where, (@($p | ForEach-Object { $_.Id }) -join ','), (@($p | ForEach-Object { $_.SessionId } | Sort-Object -Unique) -join ','))
+  $mySession = (Get-Process -Id $PID).SessionId
+  $mine = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $mySession })
+  $all = @(Get-Process -Name explorer -ErrorAction SilentlyContinue)
+  if ($mine.Count -gt 0) {
+    return ("shell guard [{0}]: explorer already running in own session pid(s)={1}" -f $Where, (@($mine | ForEach-Object { $_.Id }) -join ','))
   }
-  if (-not (Test-ArcIconsInteractiveSession (Get-Process -Id $PID).SessionId)) {
+  if (-not (Test-ArcIconsInteractiveSession $mySession)) {
     # A session-0 start would create a session-0 explorer while the user's
     # desktop stays down — worse than useless. Say so instead of faking a pass.
-    $msg = ("shell guard [{0}]: explorer.exe is NOT running and this process is in session 0; a session-0 start cannot restore the desktop — restart the shell in the interactive session." -f $Where)
+    $msg = ("shell guard [{0}]: explorer.exe is not running in session 0; a session-0 start cannot restore an interactive desktop — the multi-user refresh restarts each user's shell from their own session." -f $Where)
     [Console]::Error.WriteLine($msg)
     return $msg
   }
-  $r = Start-ArcIconsExplorer
-  $msg = ("shell guard [{0}]: {1}" -f $Where, $r.Note)
+  $r = Start-ArcIconsExplorer 20 $mySession
+  $msg = ("shell guard [{0}]: {1}{2}" -f $Where, $r.Note, $(if ($all.Count -gt 0) { " (explorer elsewhere: pid(s)=" + (@($all | Where-Object { $_.SessionId -ne $mySession } | ForEach-Object { $_.Id }) -join ',') + ")" } else { '' }))
   # Write-Host, not Write-Output: the guard must stay visible on a caller that
   # discards the return value ([void]) — the message IS the receipt.
   if (-not $r.Running) { [Console]::Error.WriteLine($msg) } else { Write-Host $msg }
   return $msg
 }
 
-# Icon-cache refresh (measured): ie4uinit.exe -show alone is NOT enough — the
-# shell keeps painting the old icons until %LOCALAPPDATA%\Microsoft\Windows\Explorer\iconcache*.db
-# is deleted and explorer restarts. Skipped automatically for a non-live
-# -SystemResourceDir (sandbox proof must never touch the real shell) and with -SkipIconCacheRefresh.
-# Stop + start is ONE guarded unit, and the returned note carries the explorer
-# pid(s) that came back, so the caller can prove the shell is up.
-function Invoke-ArcIconsIconCacheRefresh([string]$SysDir, [bool]$Skip) {
-  $liveDefault = Resolve-ArcIconsCanonicalPath (Join-Path $env:SystemRoot 'SystemResources')
-  if ($SysDir -ine $liveDefault) { return 'skipped (non-live SystemResourceDir; shell untouched)' }
-  if ($Skip) { return 'skipped (-SkipIconCacheRefresh)' }
-  if (-not (Test-ArcIconsInteractiveSession (Get-Process -Id $PID).SessionId)) {
-    # the auto-repair task runs apply as SYSTEM: never stop a shell that a
-    # session-0 process cannot put back.
-    return 'skipped (session 0: a non-interactive process must not stop a shell it cannot restore)'
+# Icon-cache refresh entry point (kept for every existing caller).
+# MEASURED 2026-11-06: the old body read the CALLER'S %LOCALAPPDATA% and stopped
+# every explorer.exe on the machine; elevated/headless runs therefore cleared the
+# wrong profile and left other users' shells down. Delegated now to the
+# multi-user engine (bin\ArcIcons-UserRefresh.ps1): every logged-on interactive
+# profile gets its own iconcache*.db + thumbcache*.db drop (thumbcache was the
+# documented gap) and its own verified explorer restart inside its own session.
+# Skipped automatically for a non-live -SystemResourceDir (sandbox proof must
+# never touch a real shell) and with -SkipIconCacheRefresh.
+function Invoke-ArcIconsIconCacheRefresh([string]$SysDir, [bool]$Skip, [string]$Root = '') {
+  if (-not (Get-Command Invoke-ArcIconsPerUserIconCacheRefresh -ErrorAction SilentlyContinue)) {
+    # fail closed, never fall back to the single-profile body that caused the bug
+    return 'FAILED: bin\ArcIcons-UserRefresh.ps1 is missing (multi-user refresh unavailable); no shell was touched'
   }
-  $dir = Join-Path $env:LOCALAPPDATA 'Microsoft\Windows\Explorer'
-  $deleted = @()
-  try {
-    foreach ($f in @(Get-ChildItem -LiteralPath $dir -Filter 'iconcache*.db' -File -ErrorAction SilentlyContinue)) {
-      try { Remove-Item -Force -LiteralPath $f.FullName -ErrorAction Stop; $deleted += $f.Name } catch { }
-    }
-  } catch { }
-  try { & ie4uinit.exe -show 2>$null | Out-Null } catch { }
-  $stopped = $false
-  try { Stop-Process -Name explorer -Force -ErrorAction Stop; $stopped = $true; Start-Sleep -Seconds 2 } catch { }
-  $shell = Start-ArcIconsExplorer
-  return ("iconcache deleted=[{0}]; explorer stopped={1}; {2}" -f ($deleted -join ','), $stopped, $shell.Note)
+  $r = Invoke-ArcIconsPerUserIconCacheRefresh -Root $Root -SysDir $SysDir -Skip $Skip
+  return [string]$r.Note
 }
+
+# The multi-user engine (session enumeration, per-profile worker, one-shot
+# interactive-token task transport). Dot-sourced LAST so it can see the helpers
+# above; it defines functions only, so loading stays side-effect free.
+. (Join-Path $PSScriptRoot 'ArcIcons-UserRefresh.ps1')
