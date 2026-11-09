@@ -27,7 +27,7 @@ The details log strip showing a run's log.
 
 ## Install
 
-Build the one-file installer, then install a theme variant with one command. No release is published, so the build runs from source and needs network access at fetch time:
+Download `ArcInstaller.exe` from the [latest release](https://github.com/nathwn12/arc-installer/releases/latest), or build the one-file installer from source (that path needs network access at fetch time):
 
 ```powershell
 git clone https://github.com/nathwn12/arc-installer.git
