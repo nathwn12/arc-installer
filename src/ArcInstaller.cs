@@ -9,9 +9,24 @@ using System.Security.Cryptography;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32.SafeHandles;
+
+// A payload that fails verification never reaches the install tree. Its own
+// type so Main can name the cause and exit non-zero instead of dying with an
+// unhandled exception (a winexe would show a crash box and leave files behind).
+sealed class PayloadIntegrityException : Exception
+{
+    public PayloadIntegrityException(string message) : base(message) { }
+}
 
 static class Program
 {
+    // Exit codes: 2 = embedded payload failed verification (nothing written),
+    // 3 = extraction/install failed for another reason. 1 is still the
+    // --selftest and --cli failure code.
+    private const int ExitPayloadUntrusted = 2;
+    private const int ExitExtractFailed = 3;
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -19,12 +34,33 @@ static class Program
         {
             return DoSelfTest();
         }
-        if (args.Length > 0 && args[0] == "--cli")
+        bool cli = args.Length > 0 && args[0] == "--cli";
+        // --extract is the headless seam tests and the release lane use to run
+        // the real launch path (verify, then extract, then stop) without the UI
+        // and without running ARC-Icons.ps1. It writes only the tool tree.
+        bool extractOnly = args.Length > 0 && args[0] == "--extract";
+        try
         {
             EnsureToolTree();
+        }
+        catch (PayloadIntegrityException ex)
+        {
+            ReportFatal("payload verification failed: " + ex.Message);
+            return ExitPayloadUntrusted;
+        }
+        catch (Exception ex)
+        {
+            ReportFatal("payload extraction failed: " + ex.Message);
+            return ExitExtractFailed;
+        }
+        if (extractOnly)
+        {
+            return 0;
+        }
+        if (cli)
+        {
             return DoCli(args);
         }
-        EnsureToolTree();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         MainForm f = new MainForm();
@@ -32,8 +68,41 @@ static class Program
         return 0;
     }
 
+    // A failed launch must still name its reason. stderr carries it for --cli,
+    // --extract and any redirected caller; a person double-clicking a winexe
+    // gets the same text in a box. A redirected stderr means a machine is
+    // listening, so no box is shown then (tests would otherwise block on it).
+    static void ReportFatal(string message)
+    {
+        try
+        {
+            Console.Error.WriteLine("ArcInstaller: " + message);
+        }
+        catch
+        {
+        }
+        try
+        {
+            if (!Console.IsErrorRedirected)
+            {
+                MessageBox.Show(message, "ArcInstaller", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        catch
+        {
+        }
+    }
+
     static string GetToolRoot()
     {
+        // Test seam only: the real launch always installs under ProgramData.
+        // The embedded payload is verified either way, so an override cannot
+        // smuggle bytes into the target tree; it only redirects the target.
+        string overrideRoot = Environment.GetEnvironmentVariable("ARCINSTALLER_TOOL_ROOT");
+        if (!string.IsNullOrEmpty(overrideRoot))
+        {
+            return Path.GetFullPath(overrideRoot);
+        }
         string baseDir = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
         return Path.Combine(baseDir, "ArcIcons");
     }
@@ -99,45 +168,469 @@ static class Program
         }
     }
 
+    private const string ManifestEntryName = "payload-manifest.json";
+
+    // Decompressed-size ceiling for the embedded payload, enforced before a
+    // single entry is decompressed. Measured on this build (2026-11-07):
+    // staging\files holds 51 files totalling 172,570,225 bytes (164.6 MiB);
+    // 4x that is 690,280,900 bytes, and 704 MiB leaves headroom for a theme
+    // revision that adds a few icon packs while still refusing a bomb (a 4 GiB
+    // payload is ~6x over). Raise it only with a new measurement in this comment.
+    private const long PayloadUncompressedCap = 704L * 1024 * 1024;
+
+    static bool IsHex64(string s)
+    {
+        if (s == null || s.Length != 64)
+        {
+            return false;
+        }
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static string NormalizeArchivePath(string name)
+    {
+        return name.Replace('\\', '/');
+    }
+
+    // Manifest and archive paths are relative and forward-slashed by build.ps1.
+    // Anything absolute, drive-qualified or carrying a ".." component is not a
+    // file this installer ever ships, so it fails closed instead of being
+    // silently skipped.
+    static bool IsUnsafeRelativePath(string rel)
+    {
+        if (string.IsNullOrEmpty(rel))
+        {
+            return true;
+        }
+        if (rel[0] == '/')
+        {
+            return true;
+        }
+        if (rel.Length >= 2 && rel[1] == ':')
+        {
+            return true;
+        }
+        string[] parts = rel.Split('/');
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (parts[i] == ".." || parts[i] == ".")
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static byte[] ReadAllBytes(Stream s)
+    {
+        using (MemoryStream mem = new MemoryStream())
+        {
+            s.CopyTo(mem);
+            return mem.ToArray();
+        }
+    }
+
+    // The one payload gate. Called on every launch (GUI, --cli, --extract) and
+    // by --selftest, before any file is created. Returns the SHA-256 this
+    // archive must produce for every entry, including the manifest itself, so
+    // extraction can verify the bytes it writes instead of trusting them.
+    //
+    // Checks, in order: entry paths stay under the install root, the sum of
+    // declared sizes fits the zip-bomb cap, payload-manifest.json exists and
+    // parses, every manifest row names a file with a well-formed digest, every
+    // archive entry has a row, every entry hashes to its row, and every row has
+    // an entry. First failure throws with the path and both digests.
+    static Dictionary<string, string> ValidatePayloadArchive(ZipArchive z)
+    {
+        long total = 0;
+        int files = 0;
+        foreach (ZipArchiveEntry e in z.Entries)
+        {
+            if (string.IsNullOrEmpty(e.Name))
+            {
+                continue; // directory entry
+            }
+            files++;
+            string rel = NormalizeArchivePath(e.FullName);
+            if (IsUnsafeRelativePath(rel))
+            {
+                throw new PayloadIntegrityException(
+                    "payload entry '" + e.FullName + "' escapes the install root");
+            }
+            total += e.Length;
+            if (total > PayloadUncompressedCap)
+            {
+                throw new PayloadIntegrityException(
+                    "payload expands past the " + PayloadUncompressedCap.ToString() +
+                    "-byte cap (zip-bomb guard) at entry '" + e.FullName + "'");
+            }
+        }
+        if (files == 0)
+        {
+            throw new PayloadIntegrityException("embedded payload.zip carries no file entries");
+        }
+
+        ZipArchiveEntry manEntry = null;
+        foreach (ZipArchiveEntry e in z.Entries)
+        {
+            if (string.Equals(NormalizeArchivePath(e.FullName), ManifestEntryName, StringComparison.OrdinalIgnoreCase))
+            {
+                manEntry = e;
+                break;
+            }
+        }
+        if (manEntry == null)
+        {
+            throw new PayloadIntegrityException(
+                "'" + ManifestEntryName + "' is missing from the embedded payload");
+        }
+
+        byte[] manBytes;
+        try
+        {
+            using (Stream ms = manEntry.Open())
+            {
+                manBytes = ReadAllBytes(ms);
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new PayloadIntegrityException(
+                "'" + ManifestEntryName + "' is unreadable: " + ex.Message);
+        }
+        string json;
+        try
+        {
+            using (StreamReader sr = new StreamReader(new MemoryStream(manBytes), Encoding.UTF8, true))
+            {
+                json = sr.ReadToEnd();
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new PayloadIntegrityException(
+                "'" + ManifestEntryName + "' is unreadable: " + ex.Message);
+        }
+        if (string.IsNullOrEmpty(json))
+        {
+            throw new PayloadIntegrityException(
+                "'" + ManifestEntryName + "' is empty");
+        }
+
+        List<string[]> pairs = ParseManifestPairs(json);
+        if (pairs.Count == 0)
+        {
+            throw new PayloadIntegrityException(
+                "'" + ManifestEntryName + "' records no files");
+        }
+
+        Dictionary<string, string> rows = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string[] pair in pairs)
+        {
+            string rel = NormalizeArchivePath(pair[0]);
+            string want = pair[1];
+            if (IsUnsafeRelativePath(rel))
+            {
+                throw new PayloadIntegrityException(
+                    "'" + ManifestEntryName + "' row '" + pair[0] + "' escapes the install root");
+            }
+            if (string.Equals(rel, ManifestEntryName, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PayloadIntegrityException(
+                    "'" + ManifestEntryName + "' records itself; it must list payload files only");
+            }
+            if (!IsHex64(want))
+            {
+                throw new PayloadIntegrityException(
+                    "'" + ManifestEntryName + "' row '" + pair[0] + "' has a malformed sha256");
+            }
+            if (rows.ContainsKey(rel))
+            {
+                throw new PayloadIntegrityException(
+                    "'" + ManifestEntryName + "' lists '" + pair[0] + "' twice");
+            }
+            rows.Add(rel, want.ToUpperInvariant());
+        }
+
+        Dictionary<string, string> expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // The manifest cannot hash itself, so its own bytes are trusted only to
+        // the extent that every row they declare matches the archive. Record
+        // the digest of the bytes we actually parsed so extraction still writes
+        // exactly what was validated.
+        expected.Add(ManifestEntryName, HashBytes(manBytes));
+        foreach (ZipArchiveEntry e in z.Entries)
+        {
+            if (string.IsNullOrEmpty(e.Name))
+            {
+                continue;
+            }
+            string rel = NormalizeArchivePath(e.FullName);
+            if (string.Equals(rel, ManifestEntryName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            string want;
+            if (!rows.TryGetValue(rel, out want))
+            {
+                throw new PayloadIntegrityException(
+                    "payload entry '" + e.FullName + "' has no '" + ManifestEntryName + "' row");
+            }
+            string have;
+            try
+            {
+                using (Stream es = e.Open())
+                {
+                    have = HashStream(es);
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new PayloadIntegrityException(
+                    "payload entry '" + e.FullName + "' is unreadable: " + ex.Message);
+            }
+            if (!string.Equals(have, want, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PayloadIntegrityException(
+                    "payload entry '" + e.FullName + "' hashes to " + have +
+                    " but '" + ManifestEntryName + "' records " + want);
+            }
+            expected.Add(rel, want);
+        }
+        foreach (string rel in rows.Keys)
+        {
+            if (!expected.ContainsKey(rel))
+            {
+                throw new PayloadIntegrityException(
+                    "'" + ManifestEntryName + "' row '" + rel + "' has no entry in the embedded payload");
+            }
+        }
+        return expected;
+    }
+
+    static string HashBytes(byte[] data)
+    {
+        using (SHA256 sha = SHA256.Create())
+        {
+            return ToHex(sha.ComputeHash(data));
+        }
+    }
+
+    static bool HasReparsePoint(string path)
+    {
+        try
+        {
+            return (File.GetAttributes(path) & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // A junction or symlink anywhere on the path to the tool root would send
+    // the verified payload somewhere else, so the root is refused if any
+    // existing component is a reparse point. Cheap: a few attribute reads.
+    static void EnsureSafeToolRoot(string root)
+    {
+        string cur = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
+        while (!string.IsNullOrEmpty(cur))
+        {
+            if (Directory.Exists(cur) && HasReparsePoint(cur))
+            {
+                throw new PayloadIntegrityException(
+                    "install root component '" + cur + "' is a reparse point; refusing to write through it");
+            }
+            string parent = Path.GetDirectoryName(cur);
+            if (string.IsNullOrEmpty(parent) || parent.Length >= cur.Length)
+            {
+                break;
+            }
+            cur = parent;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ByHandleFileInformation
+    {
+        public uint FileAttributes;
+        public uint CreationTimeLow;
+        public uint CreationTimeHigh;
+        public uint LastAccessTimeLow;
+        public uint LastAccessTimeHigh;
+        public uint LastWriteTimeLow;
+        public uint LastWriteTimeHigh;
+        public uint VolumeSerialNumber;
+        public uint FileSizeHigh;
+        public uint FileSizeLow;
+        public uint NumberOfLinks;
+        public uint FileIndexHigh;
+        public uint FileIndexLow;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
+
+    // An existing destination that is a symlink or has more than one hardlink
+    // is not a file this installer wrote: writing through it would land on
+    // whatever it points at. Reject rather than repair; the tree is untrusted.
+    static void EnsureSafeTarget(string path)
+    {
+        if (HasReparsePoint(path))
+        {
+            throw new PayloadIntegrityException(
+                "install target '" + path + "' is a reparse point; refusing to write through it");
+        }
+        uint links;
+        try
+        {
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                ByHandleFileInformation info;
+                if (!GetFileInformationByHandle(fs.SafeFileHandle, out info))
+                {
+                    throw new IOException("GetFileInformationByHandle failed with error " +
+                        Marshal.GetLastWin32Error().ToString());
+                }
+                links = info.NumberOfLinks;
+            }
+        }
+        catch (PayloadIntegrityException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new PayloadIntegrityException(
+                "install target '" + path + "' cannot be inspected: " + ex.Message);
+        }
+        if (links > 1)
+        {
+            throw new PayloadIntegrityException(
+                "install target '" + path + "' has " + links.ToString() +
+                " hardlinks; refusing to write through it");
+        }
+    }
+
+    // Writes the entry to a sibling temp file, hashes the bytes as they land,
+    // and only then moves it into place. The bytes that reach the tool tree are
+    // the bytes the manifest already vouched for, never an unverified stream.
+    static void WriteVerifiedEntry(ZipArchiveEntry e, string fullDest, string expectedHash)
+    {
+        string dir = Path.GetDirectoryName(fullDest);
+        if (!string.IsNullOrEmpty(dir))
+        {
+            Directory.CreateDirectory(dir);
+        }
+        string tmp = fullDest + ".arc-new";
+        try
+        {
+            string have;
+            using (Stream es = e.Open())
+            {
+                using (SHA256 sha = SHA256.Create())
+                {
+                    using (FileStream fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                    {
+                        byte[] buf = new byte[81920];
+                        int n;
+                        while ((n = es.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            sha.TransformBlock(buf, 0, n, buf, 0);
+                            fs.Write(buf, 0, n);
+                        }
+                        sha.TransformFinalBlock(buf, 0, 0);
+                        have = ToHex(sha.Hash);
+                    }
+                }
+            }
+            if (!string.Equals(have, expectedHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PayloadIntegrityException(
+                    "payload entry '" + e.FullName + "' changed while being extracted" +
+                    " (expected " + expectedHash + ", wrote " + have + ")");
+            }
+            if (File.Exists(fullDest))
+            {
+                File.Replace(tmp, fullDest, null);
+            }
+            else
+            {
+                File.Move(tmp, fullDest);
+            }
+        }
+        catch
+        {
+            try
+            {
+                if (File.Exists(tmp))
+                {
+                    File.Delete(tmp);
+                }
+            }
+            catch
+            {
+            }
+            throw;
+        }
+    }
+
     static void EnsureToolTree()
     {
-        string root = GetToolRoot();
-        Directory.CreateDirectory(root);
-        string fullRoot = Path.GetFullPath(root);
-        if (!fullRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
-        {
-            fullRoot = fullRoot + Path.DirectorySeparatorChar;
-        }
         Assembly asm = Assembly.GetExecutingAssembly();
         using (Stream rs = asm.GetManifestResourceStream("payload.zip"))
         {
             if (rs == null)
             {
-                throw new InvalidOperationException("embedded payload.zip missing");
+                throw new PayloadIntegrityException(
+                    "embedded payload.zip is missing from the executable");
             }
             using (ZipArchive z = new ZipArchive(rs, ZipArchiveMode.Read))
             {
+                // Verify everything before the first byte is written.
+                Dictionary<string, string> expected = ValidatePayloadArchive(z);
+
+                string root = GetToolRoot();
+                EnsureSafeToolRoot(root);
+                Directory.CreateDirectory(root);
+                string fullRoot = Path.GetFullPath(root);
+                if (!fullRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
+                {
+                    fullRoot = fullRoot + Path.DirectorySeparatorChar;
+                }
+
                 foreach (ZipArchiveEntry e in z.Entries)
                 {
                     if (string.IsNullOrEmpty(e.Name))
                     {
                         continue;
                     }
-                    string rel = e.FullName.Replace('/', Path.DirectorySeparatorChar);
-                    string dest = Path.Combine(root, rel);
+                    string rel = NormalizeArchivePath(e.FullName);
+                    string dest = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
                     string fullDest = Path.GetFullPath(dest);
                     if (!fullDest.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
                     {
-                        continue;
+                        continue; // validator already refuses these; belt and braces
+                    }
+                    string want;
+                    if (!expected.TryGetValue(rel, out want))
+                    {
+                        throw new PayloadIntegrityException(
+                            "payload entry '" + e.FullName + "' was not verified");
                     }
                     bool need = true;
                     if (File.Exists(fullDest))
                     {
-                        string want;
-                        using (Stream es = e.Open())
-                        {
-                            want = HashStream(es);
-                        }
+                        EnsureSafeTarget(fullDest);
                         string have = HashFile(fullDest);
                         if (string.Equals(want, have, StringComparison.OrdinalIgnoreCase))
                         {
@@ -146,18 +639,7 @@ static class Program
                     }
                     if (need)
                     {
-                        string d = Path.GetDirectoryName(fullDest);
-                        if (!string.IsNullOrEmpty(d))
-                        {
-                            Directory.CreateDirectory(d);
-                        }
-                        using (Stream es = e.Open())
-                        {
-                            using (FileStream fs = new FileStream(fullDest, FileMode.Create, FileAccess.Write, FileShare.None))
-                            {
-                                es.CopyTo(fs);
-                            }
-                        }
+                        WriteVerifiedEntry(e, fullDest, want);
                     }
                 }
             }
@@ -175,7 +657,6 @@ static class Program
             {
                 Directory.Delete(dir, true);
             }
-            Directory.CreateDirectory(dir);
             string fullDir = Path.GetFullPath(dir);
             if (!fullDir.EndsWith(Path.DirectorySeparatorChar.ToString()))
             {
@@ -192,6 +673,18 @@ static class Program
                 }
                 using (ZipArchive z = new ZipArchive(rs, ZipArchiveMode.Read))
                 {
+                    // Same gate the real launch runs, ahead of any extraction,
+                    // so a tampered payload fails here without leaving a file.
+                    try
+                    {
+                        ValidatePayloadArchive(z);
+                    }
+                    catch (PayloadIntegrityException ex)
+                    {
+                        Console.WriteLine("selftest FAIL " + ex.Message);
+                        return 1;
+                    }
+                    Directory.CreateDirectory(dir);
                     foreach (ZipArchiveEntry e in z.Entries)
                     {
                         if (string.IsNullOrEmpty(e.Name))
@@ -544,26 +1037,51 @@ static class Program
 
 class MainForm : Form
 {
+    // One dark palette, used everywhere: the state dot and the failure bar are
+    // the only places colour carries meaning, and both always sit beside words.
+    private static readonly Color Bg = Color.FromArgb(0x1E, 0x1E, 0x1E);
+    private static readonly Color Fg = Color.FromArgb(0xE8, 0xE8, 0xE8);
+    private static readonly Color PanelBg = Color.FromArgb(0x2D, 0x2D, 0x2D);
+    private static readonly Color EditBg = Color.FromArgb(0x25, 0x25, 0x26);
+    private static readonly Color Accent = Color.FromArgb(0x2F, 0x6F, 0x9E);
+    private static readonly Color Sub = Color.FromArgb(0xA8, 0xA8, 0xA8);
+    private static readonly Color Healthy = Color.FromArgb(0x4C, 0xAF, 0x50);
+    private static readonly Color Unknown = Color.FromArgb(0xD7, 0xA4, 0x3C);
+    private static readonly Color Danger = Color.FromArgb(0xE5, 0x53, 0x4B);
+    private static readonly Color DangerBar = Color.FromArgb(0x3A, 0x22, 0x22);
+
+    private const int DesignWidth = 560;
+
     private ComboBox variantBox;
-    private Label statusLabel;
-    private TextBox outputBox;
-    private Button applyBtn;
-    private Button repairBtn;
-    private Button revertBtn;
-    private Button refreshBtn;
     private Button installBtn;
-    private Button uninstallBtn;
-    private Button exitBtn;
+    private Button statusBtn;
+    private Button moreBtn;
+    private ContextMenuStrip moreMenu;
+    private Button detailsBtn;
+    private Label variantLabel;
+    private Label variantCaption;
+    private Label stateDot;
+    private Label stateLine1;
+    private Label stateLine2;
+    private Panel failureBar;
+    private Label failLabel;
+    private LinkLabel showDetailsLink;
+    private TextBox outputBox;
+    private PictureBox previewBox;
+
     private string toolRoot;
     private string[] ids;
     private string[] labels;
     private string[] themeDirs;
-    private PictureBox previewBox;
-    private Button detailsBtn;
+
+    private Color dotColor = Sub;
     private bool detailsOpen;
-    // Fixed-size card: collapsed shows the controls; expanded adds the log strip.
-    private const int CollapsedHeight = 198;
-    private const int ExpandedHeight = 336;
+    private bool failureVisible;
+    // 0 until measured from the autoscaled form width, then held constant so a
+    // relayout at 150% keeps its proportions instead of snapping to 96 dpi.
+    private float uiScale;
+    private bool sawFailureSignal;
+    private string firstErrorLine;
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
@@ -680,6 +1198,26 @@ class MainForm : Form
         RefreshPreview();
     }
 
+    protected override void OnShown(EventArgs e)
+    {
+        base.OnShown(e);
+        // The form has autoscaled by now; measure once from its real width.
+        this.uiScale = 0F;
+        ApplyLayout();
+    }
+
+    // The window chrome X and Esc close the app: there is no Exit button in the
+    // action row, so Escape has to work from anywhere in the form.
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (keyData == Keys.Escape)
+        {
+            this.Close();
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
     // The dropdown opens on what is actually installed, never a hardcoded
     // first item. Read-only: the same manifest StatusText reads.
     private void PreselectInstalledVariant()
@@ -710,19 +1248,17 @@ class MainForm : Form
 
     private void BuildUi()
     {
-        Color bg = Color.FromArgb(0x1E, 0x1E, 0x1E);
-        Color fg = Color.FromArgb(0xE8, 0xE8, 0xE8);
-        Color panel = Color.FromArgb(0x2D, 0x2D, 0x2D);
-        Color edit = Color.FromArgb(0x25, 0x25, 0x26);
-        Color accent = Color.FromArgb(0x2F, 0x6F, 0x9E);
-        Color sub = Color.FromArgb(0xA8, 0xA8, 0xA8);
         this.Text = "ArcInstaller";
         this.FormBorderStyle = FormBorderStyle.FixedSingle;
         this.MaximizeBox = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        this.ClientSize = new Size(560, CollapsedHeight);
-        this.BackColor = bg;
-        this.ForeColor = fg;
+        // DPI scaling: the 96 dpi design below is the baseline, so 150/200%
+        // scales every control instead of clipping the action band.
+        this.AutoScaleDimensions = new SizeF(96F, 96F);
+        this.AutoScaleMode = AutoScaleMode.Dpi;
+        this.ClientSize = new Size(DesignWidth, 188);
+        this.BackColor = Bg;
+        this.ForeColor = Fg;
         try
         {
             Icon ic = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -735,29 +1271,37 @@ class MainForm : Form
         {
         }
 
-        // Left: the variant glyph at a size a person can actually judge.
+        // Identity: the variant glyph at a size a person can actually judge,
+        // with its variant name under it. The name is a caption, not a control.
         this.previewBox = new PictureBox();
-        this.previewBox.Location = new Point(16, 18);
+        this.previewBox.Location = new Point(16, 16);
         this.previewBox.Size = new Size(72, 72);
         this.previewBox.SizeMode = PictureBoxSizeMode.Zoom;
-        this.previewBox.BackColor = panel;
+        this.previewBox.BackColor = PanelBg;
         this.previewBox.BorderStyle = BorderStyle.FixedSingle;
+        this.previewBox.TabStop = false;
         this.Controls.Add(this.previewBox);
 
-        Label pick = new Label();
-        pick.Text = "Variant";
-        pick.Location = new Point(104, 18);
-        pick.Size = new Size(120, 18);
-        pick.BackColor = bg;
-        pick.ForeColor = sub;
-        this.Controls.Add(pick);
+        this.variantCaption = new Label();
+        this.variantCaption.Font = new Font("Segoe UI", 7.5F);
+        this.variantCaption.ForeColor = Sub;
+        this.variantCaption.BackColor = Bg;
+        this.variantCaption.TextAlign = ContentAlignment.MiddleCenter;
+        this.variantCaption.AutoEllipsis = true;
+        this.variantCaption.TabStop = false;
+        this.Controls.Add(this.variantCaption);
+
+        this.variantLabel = new Label();
+        this.variantLabel.Text = "Theme variant";
+        this.variantLabel.ForeColor = Sub;
+        this.variantLabel.BackColor = Bg;
+        this.variantLabel.TabStop = false;
+        this.Controls.Add(this.variantLabel);
 
         this.variantBox = new ComboBox();
         this.variantBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        this.variantBox.Location = new Point(104, 38);
-        this.variantBox.Size = new Size(280, 22);
-        this.variantBox.BackColor = panel;
-        this.variantBox.ForeColor = fg;
+        this.variantBox.BackColor = PanelBg;
+        this.variantBox.ForeColor = Fg;
         this.variantBox.FlatStyle = FlatStyle.Flat;
         for (int i = 0; i < this.labels.Length; i++)
         {
@@ -766,46 +1310,75 @@ class MainForm : Form
         this.variantBox.SelectedIndexChanged += new EventHandler(OnVariantChanged);
         this.Controls.Add(this.variantBox);
 
-        this.statusLabel = new Label();
-        this.statusLabel.Location = new Point(104, 68);
-        this.statusLabel.Size = new Size(440, 20);
-        this.statusLabel.AutoEllipsis = true;
-        this.statusLabel.BackColor = bg;
-        this.statusLabel.ForeColor = fg;
-        this.Controls.Add(this.statusLabel);
+        // State line 1: a dot plus a word. The colour restates the word; it
+        // never carries the meaning alone.
+        this.stateDot = new Label();
+        this.stateDot.Text = "";
+        this.stateDot.BackColor = Bg;
+        this.stateDot.TabStop = false;
+        this.stateDot.Paint += new PaintEventHandler(PaintStateDot);
+        this.Controls.Add(this.stateDot);
 
-        // Apply is the action almost every open wants, so it reads primary;
-        // the rest are secondary. Behavior is unchanged.
-        int top = 112;
-        this.applyBtn = MakeBtn("Apply", 16, top, accent, Color.White, true);
-        this.applyBtn.Click += new EventHandler(OnApply);
-        this.repairBtn = MakeBtn("Repair", 128, top, panel, fg, false);
-        this.repairBtn.Click += new EventHandler(OnRepair);
-        this.revertBtn = MakeBtn("Revert", 224, top, panel, fg, false);
-        this.revertBtn.Click += new EventHandler(OnRevert);
-        this.refreshBtn = MakeBtn("Refresh", 320, top, panel, fg, false);
-        this.refreshBtn.Click += new EventHandler(OnRefresh);
-        this.exitBtn = MakeBtn("Exit", 456, top, panel, fg, false);
-        this.exitBtn.Click += new EventHandler(OnExit);
+        this.stateLine1 = new Label();
+        this.stateLine1.Text = "Not installed";
+        this.stateLine1.ForeColor = Fg;
+        this.stateLine1.BackColor = Bg;
+        this.stateLine1.AutoEllipsis = true;
+        this.stateLine1.TabStop = false;
+        this.Controls.Add(this.stateLine1);
 
-        // Full install / full uninstall: one click each, ending in a per-user
-        // icon-cache refresh for every logged-on profile and a VERIFY PASS.
-        this.installBtn = MakeBtn("Install all", 16, 148, accent, Color.White, true);
-        this.installBtn.Size = new Size(96, 26);
-        this.installBtn.Click += new EventHandler(OnInstall);
-        this.uninstallBtn = MakeBtn("Uninstall all", 120, 148, panel, fg, false);
-        this.uninstallBtn.Size = new Size(96, 26);
-        this.uninstallBtn.Click += new EventHandler(OnUninstall);
+        // State line 2: the last result. The line exists before anything runs,
+        // and it never claims OK without a real exit 0.
+        this.stateLine2 = new Label();
+        this.stateLine2.Text = "Last result: \u2014";
+        this.stateLine2.ForeColor = Sub;
+        this.stateLine2.BackColor = Bg;
+        this.stateLine2.AutoEllipsis = true;
+        this.stateLine2.TabStop = false;
+        this.Controls.Add(this.stateLine2);
+
+        // Failure bar: red, inline, above the action band. Hidden until an
+        // action actually fails, so it can never be missed or mistaken for OK.
+        this.failureBar = new Panel();
+        this.failureBar.BackColor = DangerBar;
+        this.failureBar.Visible = false;
+        this.failLabel = new Label();
+        this.failLabel.Text = "";
+        this.failLabel.ForeColor = Danger;
+        this.failLabel.BackColor = DangerBar;
+        this.failLabel.AutoEllipsis = true;
+        this.failLabel.TabStop = false;
+        this.failureBar.Controls.Add(this.failLabel);
+        this.showDetailsLink = new LinkLabel();
+        this.showDetailsLink.Text = "Show details";
+        this.showDetailsLink.LinkColor = Danger;
+        this.showDetailsLink.ActiveLinkColor = Color.White;
+        this.showDetailsLink.VisitedLinkColor = Danger;
+        this.showDetailsLink.LinkBehavior = LinkBehavior.HoverUnderline;
+        this.showDetailsLink.BackColor = DangerBar;
+        this.showDetailsLink.TextAlign = ContentAlignment.MiddleRight;
+        this.showDetailsLink.TabStop = false;
+        this.showDetailsLink.LinkClicked += new LinkLabelLinkClickedEventHandler(OnShowDetails);
+        this.failureBar.Controls.Add(this.showDetailsLink);
+        this.Controls.Add(this.failureBar);
+
+        // Exactly one primary: Install theme absorbs Apply and Install all.
+        this.installBtn = MakeBtn("Install theme", Accent, Color.White, true);
+        this.installBtn.Click += new EventHandler(OnInstallClick);
+        this.statusBtn = MakeBtn("Check status", PanelBg, Fg, false);
+        this.statusBtn.Click += new EventHandler(OnStatusClick);
+        this.moreBtn = MakeBtn("More \u25BE", PanelBg, Fg, false);
+        this.moreBtn.Click += new EventHandler(OnMoreClick);
 
         // The log is a strip, shut by default - no permanent empty void.
         this.detailsBtn = new Button();
         this.detailsBtn.Text = "Details \u25B8";
-        this.detailsBtn.Location = new Point(224, 148);
-        this.detailsBtn.Size = new Size(96, 26);
         this.detailsBtn.FlatStyle = FlatStyle.Flat;
-        this.detailsBtn.BackColor = panel;
-        this.detailsBtn.ForeColor = fg;
-        this.detailsBtn.FlatAppearance.BorderColor = Color.FromArgb(0x3C, 0x3C, 0x3C);
+        this.detailsBtn.BackColor = Bg;
+        this.detailsBtn.ForeColor = Sub;
+        this.detailsBtn.FlatAppearance.BorderSize = 0;
+        this.detailsBtn.TextAlign = ContentAlignment.MiddleRight;
+        this.detailsBtn.Cursor = Cursors.Hand;
         this.detailsBtn.Click += new EventHandler(OnToggleDetails);
         this.Controls.Add(this.detailsBtn);
 
@@ -815,39 +1388,135 @@ class MainForm : Form
         this.outputBox.ScrollBars = ScrollBars.Both;
         this.outputBox.WordWrap = false;
         this.outputBox.Font = new Font("Consolas", 9);
-        this.outputBox.Location = new Point(16, 190);
-        this.outputBox.Size = new Size(528, 130);
-        this.outputBox.BackColor = edit;
+        this.outputBox.BackColor = EditBg;
         this.outputBox.ForeColor = Color.FromArgb(0xD4, 0xD4, 0xD4);
         this.outputBox.BorderStyle = BorderStyle.FixedSingle;
         this.outputBox.Visible = false;
         this.Controls.Add(this.outputBox);
+
+        // Overflow: destructive and occasional verbs live behind one menu, so
+        // they cannot compete with Install theme for the same click.
+        this.moreMenu = new ContextMenuStrip();
+        this.moreMenu.BackColor = PanelBg;
+        this.moreMenu.ForeColor = Fg;
+        ToolStripMenuItem remove = new ToolStripMenuItem("Remove theme\u2026");
+        remove.ForeColor = Danger;
+        remove.Click += new EventHandler(OnRemoveTheme);
+        ToolStripMenuItem repair = new ToolStripMenuItem("Repair\u2026");
+        repair.ForeColor = Fg;
+        repair.Click += new EventHandler(OnRepairClick);
+        ToolStripMenuItem logs = new ToolStripMenuItem("Open logs folder");
+        logs.ForeColor = Fg;
+        logs.Click += new EventHandler(OnOpenLogs);
+        this.moreMenu.Items.Add(remove);
+        this.moreMenu.Items.Add(new ToolStripSeparator());
+        this.moreMenu.Items.Add(repair);
+        this.moreMenu.Items.Add(logs);
+        this.moreBtn.ContextMenuStrip = this.moreMenu;
+
+        // Tab order is the reading order of the card.
+        this.variantBox.TabIndex = 0;
+        this.installBtn.TabIndex = 1;
+        this.statusBtn.TabIndex = 2;
+        this.moreBtn.TabIndex = 3;
+        this.detailsBtn.TabIndex = 4;
+        this.outputBox.TabIndex = 5;
+        this.AcceptButton = this.installBtn;
+
+        this.uiScale = 1F;
+        ApplyLayout();
     }
 
-    private Button MakeBtn(string text, int x, int y, Color back, Color fore, bool primary)
+    private Button MakeBtn(string text, Color back, Color fore, bool bold)
     {
         Button b = new Button();
         b.Text = text;
-        b.Location = new Point(x, y);
-        b.Size = new Size(88, 28);
         b.FlatStyle = FlatStyle.Flat;
         b.BackColor = back;
         b.ForeColor = fore;
-        b.FlatAppearance.BorderColor = Color.FromArgb(0x3C, 0x3C, 0x3C);
-        if (primary)
+        b.FlatAppearance.BorderColor = bold ? Accent : Color.FromArgb(0x3C, 0x3C, 0x3C);
+        if (bold)
         {
-            b.Font = new Font(b.Font, FontStyle.Bold);
+            b.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
         }
         this.Controls.Add(b);
         return b;
     }
 
+    private static int S(int v, float s)
+    {
+        return (int)Math.Round((double)v * (double)s);
+    }
+
+    private static Rectangle R(int x, int y, int w, int h, float s)
+    {
+        return new Rectangle(S(x, s), S(y, s), S(w, s), S(h, s));
+    }
+
+    // One layout routine owns every position and the window height, so the
+    // failure bar appearing moves the action band down instead of overlapping
+    // the state lines. Expanded height is the log strip, never a second row.
+    private void ApplyLayout()
+    {
+        if (this.uiScale <= 0F)
+        {
+            float w = (float)this.ClientSize.Width / (float)DesignWidth;
+            if (w < 0.5F || w > 4F)
+            {
+                w = 1F;
+            }
+            this.uiScale = w;
+        }
+        float s = this.uiScale;
+        int bandY = this.failureVisible ? 150 : 112;
+        int detailsY = bandY + 40;
+        int logY = detailsY + 28;
+
+        this.previewBox.Bounds = R(16, 16, 72, 72, s);
+        this.variantCaption.Bounds = R(8, 92, 88, 16, s);
+        this.variantLabel.Bounds = R(112, 16, 200, 16, s);
+        this.variantBox.Bounds = R(112, 34, 280, 24, s);
+        this.stateDot.Bounds = R(112, 67, 10, 10, s);
+        this.stateLine1.Bounds = R(128, 62, 416, 18, s);
+        this.stateLine2.Bounds = R(112, 84, 432, 18, s);
+
+        this.failureBar.Bounds = R(16, 112, 528, 30, s);
+        this.failLabel.Bounds = R(10, 7, 392, 16, s);
+        this.showDetailsLink.Bounds = R(406, 3, 112, 24, s);
+        this.failureBar.Visible = this.failureVisible;
+
+        this.installBtn.Bounds = R(16, bandY, 200, 32, s);
+        this.statusBtn.Bounds = R(224, bandY, 112, 32, s);
+        this.moreBtn.Bounds = R(432, bandY, 112, 32, s);
+        this.detailsBtn.Bounds = R(454, detailsY, 90, 20, s);
+        this.detailsBtn.Text = this.detailsOpen ? "Details \u25BE" : "Details \u25B8";
+        this.outputBox.Bounds = R(16, logY, 528, 130, s);
+        this.outputBox.Visible = this.detailsOpen;
+
+        int height = detailsY + (this.detailsOpen ? 174 : 36);
+        this.ClientSize = new Size(S(DesignWidth, s), S(height, s));
+    }
+
+    private void PaintStateDot(object sender, PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+        Rectangle r = this.stateDot.ClientRectangle;
+        using (SolidBrush b = new SolidBrush(this.dotColor))
+        {
+            e.Graphics.FillEllipse(b, 0.5f, 0.5f, (float)r.Width - 1.5f, (float)r.Height - 1.5f);
+        }
+    }
+
+    private void OnShowDetails(object s, LinkLabelLinkClickedEventArgs e)
+    {
+        this.detailsOpen = true;
+        ApplyLayout();
+    }
+
     private void OnToggleDetails(object s, EventArgs e)
     {
         this.detailsOpen = !this.detailsOpen;
-        this.outputBox.Visible = this.detailsOpen;
-        this.detailsBtn.Text = this.detailsOpen ? "Details \u25BE" : "Details \u25B8";
-        this.ClientSize = new Size(this.ClientSize.Width, this.detailsOpen ? ExpandedHeight : CollapsedHeight);
+        ApplyLayout();
     }
 
     private void OnVariantChanged(object s, EventArgs e)
@@ -874,6 +1543,7 @@ class MainForm : Form
             {
                 i = 0;
             }
+            this.variantCaption.Text = this.labels[i];
             string dll = Path.Combine(this.toolRoot, "theme");
             dll = Path.Combine(dll, this.themeDirs[i]);
             dll = Path.Combine(dll, "imageres.dll");
@@ -903,10 +1573,101 @@ class MainForm : Form
         }
     }
 
+    private enum Health
+    {
+        Healthy,
+        NotInstalled,
+        Unknown,
+        Attention
+    }
+
+    // Health is read from the same manifest StatusText reads. "Drift" here is
+    // the loudest cheap signal available without running an action: the
+    // manifest claims a variant whose theme payload is no longer on disk, or
+    // the manifest itself cannot be read. Both mean the card must not say OK.
+    private Health ComputeHealth(out string variantLabel)
+    {
+        variantLabel = "";
+        try
+        {
+            string man = Path.Combine(this.toolRoot, "installed-manifest.json");
+            if (!File.Exists(man))
+            {
+                return Health.NotInstalled;
+            }
+            string status = Program.StatusText(this.toolRoot);
+            if (status != null && status.IndexOf("unreadable", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return Health.Attention;
+            }
+            string vid = Program.InstalledVariantId(this.toolRoot);
+            if (string.IsNullOrEmpty(vid))
+            {
+                return Health.Unknown;
+            }
+            int i = IndexOfId(vid);
+            if (i < 0)
+            {
+                return Health.Unknown;
+            }
+            variantLabel = this.labels[i];
+            string dll = Path.Combine(this.toolRoot, "theme");
+            dll = Path.Combine(dll, this.themeDirs[i]);
+            dll = Path.Combine(dll, "imageres.dll");
+            if (!File.Exists(dll))
+            {
+                return Health.Attention;
+            }
+            return Health.Healthy;
+        }
+        catch
+        {
+            return Health.Attention;
+        }
+    }
+
+    private int IndexOfId(string id)
+    {
+        for (int i = 0; i < this.ids.Length; i++)
+        {
+            if (string.Equals(this.ids[i], id, StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private void RefreshStatus()
     {
-        string s = Program.StatusText(this.toolRoot);
-        this.statusLabel.Text = s;
+        string variantLabel;
+        Health h = ComputeHealth(out variantLabel);
+        switch (h)
+        {
+            case Health.Healthy:
+                this.dotColor = Healthy;
+                this.stateLine1.Text = "Installed: " + variantLabel + " \u2014 healthy";
+                this.stateLine1.ForeColor = Fg;
+                break;
+            case Health.NotInstalled:
+                this.dotColor = Sub;
+                this.stateLine1.Text = "Not installed";
+                this.stateLine1.ForeColor = Fg;
+                break;
+            case Health.Unknown:
+                this.dotColor = Unknown;
+                this.stateLine1.Text = "Installed: ? \u2014 status unknown";
+                this.stateLine1.ForeColor = Fg;
+                break;
+            default:
+                this.dotColor = Danger;
+                this.stateLine1.Text = "Installed: " +
+                    (string.IsNullOrEmpty(variantLabel) ? "?" : variantLabel) +
+                    " \u2014 needs attention";
+                this.stateLine1.ForeColor = Fg;
+                break;
+        }
+        this.stateDot.Invalidate();
     }
 
     private string CurrentVariantId()
@@ -922,12 +1683,9 @@ class MainForm : Form
     private void SetBusy(bool busy)
     {
         bool en = !busy;
-        this.applyBtn.Enabled = en;
-        this.repairBtn.Enabled = en;
-        this.revertBtn.Enabled = en;
-        this.refreshBtn.Enabled = en;
         this.installBtn.Enabled = en;
-        this.uninstallBtn.Enabled = en;
+        this.statusBtn.Enabled = en;
+        this.moreBtn.Enabled = en;
         this.variantBox.Enabled = en;
     }
 
@@ -948,22 +1706,87 @@ class MainForm : Form
         this.outputBox.AppendText(line + "\r\n");
     }
 
-    private void OnApply(object s, EventArgs e) { RunAction("apply"); }
-    private void OnRepair(object s, EventArgs e) { RunAction("repair"); }
-    private void OnRevert(object s, EventArgs e) { RunAction("revert"); }
-    private void OnRefresh(object s, EventArgs e) { RunAction("refresh"); }
-    private void OnInstall(object s, EventArgs e) { RunAction("install"); }
-    private void OnUninstall(object s, EventArgs e) { RunAction("uninstall"); }
-    private void OnExit(object s, EventArgs e) { this.Close(); }
+    private void ClearFailure()
+    {
+        this.failureVisible = false;
+        this.failLabel.Text = "";
+    }
+
+    private void ShowLastResultOk(string action)
+    {
+        this.stateLine2.ForeColor = Sub;
+        this.stateLine2.Text = "Last result: OK " + action + " " + DateTime.Now.ToString("HH:mm");
+    }
+
+    // A failure is never silent: red line 2, the inline red bar with the first
+    // error line, and the log strip opened so the whole story is one click away.
+    private void ShowFailure(string firstError, string action, string exitText)
+    {
+        this.failureVisible = true;
+        this.detailsOpen = true;
+        this.failLabel.Text = string.IsNullOrEmpty(firstError)
+            ? "The action failed. See details for the full output."
+            : firstError;
+        this.stateLine2.ForeColor = Danger;
+        this.stateLine2.Text = "Last result: FAILED " + action + " " + exitText;
+        ApplyLayout();
+    }
+
+    private void OnInstallClick(object s, EventArgs e) { RunAction("install"); }
+    private void OnStatusClick(object s, EventArgs e) { RunAction("status"); }
+    private void OnRepairClick(object s, EventArgs e) { RunAction("repair"); }
+
+    private void OnMoreClick(object s, EventArgs e)
+    {
+        this.moreMenu.Show(this.moreBtn, new Point(0, this.moreBtn.Height));
+    }
+
+    // Destructive verbs confirm in plain words: what comes back, what goes.
+    private void OnRemoveTheme(object s, EventArgs e)
+    {
+        DialogResult r = MessageBox.Show(
+            this,
+            "Remove the Arc icon theme?\n\nWindows icons return to their stock appearance and the installed theme is removed from this PC.",
+            "Remove theme",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (r == DialogResult.OK)
+        {
+            RunAction("uninstall");
+        }
+    }
+
+    private void OnOpenLogs(object s, EventArgs e)
+    {
+        try
+        {
+            string logs = Path.Combine(this.toolRoot, "logs");
+            if (!Directory.Exists(logs))
+            {
+                MessageBox.Show(this, "No logs folder yet. Run an action first.", "ArcInstaller",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            Process.Start("explorer.exe", "\"" + logs + "\"");
+        }
+        catch (Exception ex)
+        {
+            ShowFailure("Could not open the logs folder: " + ex.Message, "logs", "(could not open)");
+        }
+    }
 
     private void RunAction(string action)
     {
         string variantId = CurrentVariantId();
+        ClearFailure();
+        this.sawFailureSignal = false;
+        this.firstErrorLine = null;
         SetBusy(true);
-        if (!this.detailsOpen)
-        {
-            OnToggleDetails(null, EventArgs.Empty);
-        }
+        // Running an action opens the log, same as before; the difference is
+        // that a failure also must, even if the strip was closed.
+        this.detailsOpen = true;
+        ApplyLayout();
         AppendLine("== " + action + " variant=" + variantId + " ==");
         try
         {
@@ -992,6 +1815,7 @@ class MainForm : Form
         catch (Exception ex)
         {
             AppendLine("FAILED " + ex.Message);
+            ShowFailure(ex.Message, action, "(could not start)");
             SetBusy(false);
         }
     }
@@ -1016,18 +1840,36 @@ class MainForm : Form
 
     private void OnOut(object s, DataReceivedEventArgs e)
     {
-        if (e.Data != null)
+        if (e.Data == null)
         {
-            AppendLine(e.Data);
+            return;
         }
+        // A script that printed FAIL or FAILED has failed even if it still
+        // exited 0 (Show-Status runs verify without propagating its code).
+        string upper = e.Data.ToUpperInvariant();
+        if (upper.IndexOf("FAILED", StringComparison.Ordinal) >= 0 ||
+            upper.IndexOf("FAIL", StringComparison.Ordinal) >= 0)
+        {
+            this.sawFailureSignal = true;
+            if (this.firstErrorLine == null)
+            {
+                this.firstErrorLine = e.Data.Trim();
+            }
+        }
+        AppendLine(e.Data);
     }
 
     private void OnErr(object s, DataReceivedEventArgs e)
     {
-        if (e.Data != null)
+        if (e.Data == null)
         {
-            AppendLine(e.Data);
+            return;
         }
+        if (this.firstErrorLine == null)
+        {
+            this.firstErrorLine = e.Data.Trim();
+        }
+        AppendLine(e.Data);
     }
 
     private void WaitProc(object state)
@@ -1035,22 +1877,37 @@ class MainForm : Form
         object[] arr = (object[])state;
         Process proc = (Process)arr[0];
         string action = (string)arr[1];
+        // The parameterless overload also waits for the redirected streams to
+        // reach EOF, so the failure token scan above is complete here.
         proc.WaitForExit();
         int code = proc.ExitCode;
         try { proc.Close(); }
         catch { }
-        this.BeginInvoke((MethodInvoker)delegate
+        if (this.IsDisposed)
         {
-            if (code == 0)
+            return;
+        }
+        try
+        {
+            this.BeginInvoke((MethodInvoker)delegate
             {
-                AppendLine("OK " + action);
-            }
-            else
-            {
-                AppendLine("FAILED (exit " + code.ToString() + ")");
-            }
-            RefreshStatus();
-            SetBusy(false);
-        });
+                if (code == 0 && !this.sawFailureSignal)
+                {
+                    AppendLine("OK " + action);
+                    ShowLastResultOk(action);
+                }
+                else
+                {
+                    string exitText = code == 0 ? "(reported a failure)" : "(exit " + code.ToString() + ")";
+                    AppendLine("FAILED " + action + " " + exitText);
+                    ShowFailure(this.firstErrorLine, action, exitText);
+                }
+                RefreshStatus();
+                SetBusy(false);
+            });
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 }

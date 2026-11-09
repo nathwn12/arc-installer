@@ -6,10 +6,12 @@ Icon-theme installer for `C:\Windows\SystemResources`: replaces three
 resource payloads with **merged** copies (stock resources + ARC theme icons),
 and can undo it. Root: `%ProgramData%\ArcIcons`.
 
-`apply.ps1` is THE one file-mutating install command — there is no separate
+`apply.ps1` is the one file-mutating install command; there is no separate
 finalizer step (the finalize logic lives inside apply/restore).
-`ARC-Icons.ps1 -Action install` / `-Action uninstall` orchestrate it: one
-action each, ending in a per-user icon-cache refresh and a VERIFY PASS.
+`ARC-Icons.ps1 -Action install` / `-Action uninstall` / `-Action status` are the
+three normal verbs: install, remove, and a read-only check. Every other action
+(`apply`, `revert`, `repair`, `refresh`, `merge`, `task-on`, `task-off`) is an
+advanced recovery or diagnostic verb, documented under Commands.
 `bin\Live-Install.ps1` and `bin\Finalize-Security.ps1` are kept as measured
 reference only and are superseded; do not run them alongside `apply.ps1`.
 
@@ -71,8 +73,9 @@ Every step below was measured live, not assumed:
   (`bin\Refresh-UserIconCache.ps1`) refuses a SID that is not its own token,
   stops only its own session's explorer, drops both caches, runs
   `ie4uinit -show`, restarts explorer and proves an explorer pid is back in
-  that same session. Apply and restore do this automatically on live runs
-  (`-SkipIconCacheRefresh` opts out; sandbox runs never touch a shell).
+  that same session. `apply.ps1` and `restore.ps1` do this automatically on
+  live runs (`-SkipIconCacheRefresh` opts out; sandbox runs never touch a
+  shell).
 
 ### Why not upstream's Clear_icon_cache.bat
 
@@ -149,46 +152,68 @@ hand.
 
 ## Commands
 
-All scripts accept `-Root <path>` / `-SystemResourceDir <path>` for sandbox
-runs (sandbox runs REQUIRE an explicit `-SystemResourceDir`). Live defaults:
-`-Root %ProgramData%\ArcIcons`
-`-SystemResourceDir C:\Windows\SystemResources`. Run elevated.
+Normal use is three verbs. Run elevated. Live defaults:
+`-Root %ProgramData%\ArcIcons`,
+`-SystemResourceDir C:\Windows\SystemResources`.
 
 ```powershell
-# FULL INSTALL in one action: capture-if-fresh -> merge the chosen variant ->
-# restore-if-switching -> apply -> refresh EVERY logged-on profile -> verify PASS
+# install: capture-if-fresh -> merge the chosen variant -> restore-if-switching
+# -> apply -> refresh EVERY logged-on profile -> verify PASS
 pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action install -Variant dark-grey -Yes
-# FULL UNINSTALL in one action: pristine originals -> refresh every profile ->
-# verify PASS (mode=original). Add -CleanState to also remove state.json,
-# installed-manifest.json and stage\; originals\ and logs\ are always kept.
+# remove: pristine originals -> refresh every profile -> verify PASS (mode=original)
 pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action uninstall -Yes
-pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action uninstall -CleanState -Yes
-# icon cache only, every logged-on profile
-pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action refresh -Yes
-# preview only (changes nothing)
-pwsh -NoProfile -File %ProgramData%\ArcIcons\ARC-Icons.ps1 -Action install -DryRun
-pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -DryRun
-# install the merged theme without the controller (no variant switch, no verify)
-pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1
-# install, stopping mapped-file holders (explorer/RuntimeBroker) first
-pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -CloseHolders
-# check current state (prints ARC-ICONS-VERIFY: PASS / FAIL)
-pwsh -NoProfile -File %ProgramData%\ArcIcons\verify.ps1
-# undo: put the pristine originals back (recreates a missing target)
-pwsh -NoProfile -File %ProgramData%\ArcIcons\restore.ps1
-# auto-repair registration (SYSTEM task, startup + 2 min delay)
-pwsh -NoProfile -File %ProgramData%\ArcIcons\install-autorepair.ps1
-pwsh -NoProfile -File %ProgramData%\ArcIcons\remove-autorepair.ps1
+# check status: read-only; prints PASS or FAIL (needs state.json) and exits non-zero on FAIL
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action status
 ```
 
-Flags: `-Action install|uninstall` (full, one action, ends in PASS),
-`-CleanState` (uninstall: also drop state.json / installed-manifest.json /
-stage\), `-DryRun` (plan only), `-CloseHolders` (apply/restore: stop
+`-Action uninstall -CleanState -Yes` also removes `state.json`,
+`installed-manifest.json` and `stage\`; `originals\` and `logs\` are always
+kept. `-DryRun` previews an install, apply, uninstall or repair without writing.
+
+### Advanced commands
+
+These are for recovery and diagnostics, not normal use. Every one runs through
+the same controller and exits non-zero when its chain fails.
+
+| Action | What it does |
+| --- | --- |
+| `apply` | Apply or re-apply the recorded merge without a variant switch |
+| `revert` | Restore the pristine originals without the full removal chain |
+| `repair` | Re-apply only when the live payload matches the recorded original; an unknown payload is never overwritten |
+| `refresh` | Rebuild the icon and thumbnail cache for every logged-on profile |
+| `merge` | Rebuild `stage\` and `installed-manifest.json` from the originals and the theme |
+| `task-on` | Enable auto-repair at startup |
+| `task-off` | Disable auto-repair at startup |
+
+For example:
+
+```powershell
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action repair -DryRun
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action merge -Variant dark-grey -Yes
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action apply -Yes
+```
+
+### Underlying scripts
+
+`apply.ps1`, `restore.ps1`, `verify.ps1` and `bin\Merge-IconTheme.ps1` remain
+callable directly for a measured procedure that needs one step at a time. They
+are the mechanism, not the user surface:
+
+```powershell
+pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -DryRun
+pwsh -NoProfile -File %ProgramData%\ArcIcons\apply.ps1 -CloseHolders
+pwsh -NoProfile -File %ProgramData%\ArcIcons\verify.ps1
+pwsh -NoProfile -File %ProgramData%\ArcIcons\restore.ps1
+```
+
+Controller flags: `-Variant`, `-Yes`, `-DryRun`, `-CleanState`, `-Root` /
+`-SystemResourceDir` (sandbox runs REQUIRE an explicit `-SystemResourceDir`;
+the pair is the only supported sandbox form, and a non-default `-Root` may
+never pair with the live SystemResources directory).
+
+Direct-script flags: `-DryRun` (plan only), `-CloseHolders` (apply/restore: stop
 Restart-Manager holders of mapped files first), `-SkipIconCacheRefresh`
-(apply/restore: skip the per-user cache delete + explorer restart),
-`-Root` / `-SystemResourceDir` (sandbox runs REQUIRE an explicit
-`-SystemResourceDir`; the pair is the only supported sandbox form, and a
-non-default `-Root` may never pair with the live SystemResources directory).
+(apply/restore: skip the per-user cache delete + explorer restart).
 
 Preflight is unconditional and `-Force` can NEVER bypass it: the pristine
 backup must exist with `sha256 == originalSha256`, the stage file must exist
@@ -257,41 +282,139 @@ verifies PASS.
 ## After a Windows Update: the theme reverts, re-merge it
 
 A Windows Update replaces the SystemResources payloads (and the WinSxS
-copies) with new binaries: the theme visibly reverts and `repair.ps1`
-reports `drift-unknown-payload`. Do NOT `-Force` the old stage files over
-the new payload — they were merged against the OLD originals. The exact
-re-merge procedure:
+copies) with new binaries: the theme visibly reverts and `-Action repair`
+reports `drift-unknown-payload`. Do NOT `-Force` the old stage files over the
+new payload: they were merged against the OLD originals. `-Action install` and
+the window's `Install theme` classify every live file before mutating anything
+and refuse an unknown payload. `-Action revert` and `-Action uninstall` do not:
+both run `restore.ps1`, which puts the pre-update originals back. Do not run
+them to "clean up" before the rebase below.
+
+The exact re-merge procedure:
 
 1. Re-fetch the theme (same origin recorded in `originals\manifest.json`).
-2. Back up the NEW originals: copy the three live
-   `C:\Windows\SystemResources\*.mun` files plus their fresh SDDL/owner rows
-   into a new `originals\` set (new hashes, new baseline — the old
-   `originals\manifest.json` entries no longer describe these files).
-3. Run `bin\Merge-IconTheme.ps1 -Build` to produce fresh `stage\` files and a
-   fresh `installed-manifest.json` (with the NEW `originalSha256` values).
-4. `apply.ps1 -DryRun`, then `apply.ps1`, then `verify.ps1` → PASS.
+2. Rebase each file the refusal names onto the current live payload. `install`
+   prints the file name and its live hash. The rebase is dry-run by default;
+   `-Commit` writes it. It archives the superseded original under
+   `originals\superseded\`, records the new hash and WinSxS component, and
+   refuses a file with no attributable WinSxS sibling:
+
+   ```powershell
+   pwsh -NoProfile -File "$env:ProgramData\ArcIcons\bin\Rebase-ArcIconsOriginal.ps1" -Name imageres.dll.mun -ExpectLiveHash <live hash from the refusal> -Commit
+   ```
+
+   Repeat for `imagesp1.dll.mun` and `zipfldr.dll.mun` when they are named.
+3. Rebuild and apply. `-Action install` re-merges and restores automatically once
+   every live payload is classified; the explicit advanced path is `merge`,
+   `revert`, then `apply`. `revert` is safe here because the rebase recorded the
+   new stock payloads as the originals:
+
+   ```powershell
+   pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action merge -Variant dark-grey -Yes
+   pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action revert -Yes
+   pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action apply -DryRun
+   pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action apply -Yes
+   ```
+
+4. Check the result: `-Action status` must print PASS.
+
+## When an apply is interrupted
+
+Power loss or a killed process skips the rollback path: `apply.ps1` takes the
+SystemResources directory ACL before its first file and restores it in a
+`finally`, so an interrupted run can leave the directory granted to
+Administrators plus one payload missing. The journal at
+`%ProgramData%\ArcIcons\logs\apply.journal.jsonl` records the last `apply` op
+in flight (name, live hash, stage path). Recover with `revert`, then reinstall:
+
+```powershell
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action revert -Yes
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action install -Variant dark-grey -Yes
+```
+
+`revert` runs `restore.ps1 -CloseHolders`, which recreates a missing payload
+from the verified pristine backup, restores the full baseline SDDL on the new
+file and the surviving WinSxS sibling, and restores the directory baseline.
+`-Action repair` is not the fix: a missing or unknown live file classifies as
+`drift-unknown-payload`, so repair writes nothing (`repair.ps1` lines 85-95 and
+115-131).
+
+## When uninstall refuses
+
+`-Action uninstall` refuses before writing when `originals\manifest.json` is
+missing, with `ARC-ICONS-UNINSTALL: REFUSED` and "no pristine copy to restore."
+That is deliberate: with no pristine backup there is nothing safe to put back,
+so the controller names the missing file instead of guessing. `verify.ps1` and
+`-Action status` also need that manifest, so neither can certify the result
+until the state is rebuilt or cleared.
+
+- **The theme is already gone.** If a Windows Update replaced the payloads, the
+  live files are stock and there is nothing to restore. Confirm by hand: each
+  file has owner `NT SERVICE\TrustedInstaller` and a WinSxS sibling in
+  `fsutil hardlink list`. Then clear the stale tool state by hand (the step
+  `-CleanState` would have run): remove `state.json`, `installed-manifest.json`
+  and `stage\`. Keep `originals\` and `logs\`.
+- **The theme is still live.** Do not improvise a new `originals\` set from the
+  live files: that would record the theme payload as pristine. Restore the
+  stock payloads with the OS backstop (`sfc /scannow`, then
+  `DISM /Online /Cleanup-Image /RestoreHealth`); if the component store cannot
+  supply them, repair or reinstall Windows. Once the live files are stock,
+  clear the state by hand as above. `restore.ps1` cannot recreate a payload with
+  no recorded original; the controller refuses rather than overwrite a file it
+  cannot restore.
+
+If `originals\manifest.json` exists and uninstall fails at `RESTORE FAILED`,
+that is a holder or ACL problem, not a missing backup: `-Action revert -Yes`
+passes `-CloseHolders` and retries the same restore, and
+`logs\restore.journal.jsonl` names the last operation in flight.
+
+## When apply refuses a stale stage
+
+`apply.ps1` preflight compares each `stage\` file with the hash recorded in
+`installed-manifest.json`, then hashes the three theme inputs on disk against
+the `sourceOrigin` hashes recorded in that manifest; it refuses on either
+mismatch (`<name>: staged hash ... != manifest merged ...`, or `stale stage:
+... merged from a different theme generation ...`). An older manifest with no
+usable `sourceOrigin` is treated as stale on purpose. A `-Pair` merge likewise
+refuses an untouched row whose stage no longer matches its recorded merge.
+Rebuild the full stage and manifest for the variant, restore the pristine
+originals, preview, then apply. `revert` is idempotent when live is already
+original; it is required when live holds the previous merge, because the new
+`mergedSha256` no longer matches that live file.
+
+```powershell
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action merge -Variant dark-grey -Yes
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action revert -Yes
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action apply -DryRun
+pwsh -NoProfile -File "$env:ProgramData\ArcIcons\ARC-Icons.ps1" -Action apply -Yes
+```
+
+The guard proves the stage against both the manifest hashes and the theme on
+disk, so a merge built before the theme was regenerated or re-fetched is
+refused. `ARC-Icons.ps1 -Action install` runs the same check and re-merges
+rather than applying an unprovable stage.
 
 ## Swapping in a newer theme
 
 1. Land the newer payload (`imageres.dll`, `imagesp1.dll`, `zipfldr.dll`) in the
    variant source dir `theme\<variant>\Windhawk Resources\`. Do not land
    `stage\` or `installed-manifest.json` by hand — the merge step writes both.
-2. Let the selector run the recipe: `ARC-Icons.ps1 -Action install -Variant <id>`
-   self-chains merge → restore → apply → per-user refresh → verify for a
-   variant switch (menu 11 → 1); a newer payload for the SAME variant is menu 7
-   (merge) → 4 (revert) → 3 (apply).
+2. Run `install` for the variant. A variant switch self-chains merge -> restore
+   -> apply -> per-user refresh -> verify. A newer payload for the SAME variant
+   is detected as a stale stage and rebuilt by the same command.
 3. A refusal is loud, never a silent close: the reason is named (missing variant
    source, or a live payload that is neither the recorded original nor the
-   recorded merge) and the window holds open. Nothing is applied then.
+   recorded merge), the status line turns red, and the details strip opens.
+   Nothing is applied then.
 
 ## Recovery ladder
 
-1. `ARC-Icons.ps1 -Action uninstall -Yes` (or `restore.ps1` directly): puts the
-   pristine originals back, refreshes every logged-on profile's icon and
-   thumbnail cache, and re-checks hash/owner/DACL on both paths; it recreates a
-   missing target instead of refusing.
-2. `verify.ps1` in `original` mode → PASS means the OS files are pristine
-   (theme invariants report `not-applicable` there by design).
+1. `ARC-Icons.ps1 -Action uninstall -Yes` (or the advanced `-Action revert`):
+   puts the pristine originals back, refreshes every logged-on profile's icon
+   and thumbnail cache, and re-checks hash/owner/DACL on both paths; it
+   recreates a missing target instead of refusing.
+2. `ARC-Icons.ps1 -Action status` in `original` mode -> PASS means the OS files
+   are pristine (theme invariants report `not-applicable` there by design).
 3. If the files verify but the desktop still shows stale icons, the payload was
    not the problem: run `ARC-Icons.ps1 -Action refresh -Yes` and read the
    per-profile lines; a profile listed FAIL could not restart its shell.

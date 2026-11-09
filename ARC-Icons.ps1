@@ -4,22 +4,34 @@
 #   variant switch, visible refusals, guaranteed explorer restart/restore
 #
 # Usage:
-#   ARC-Icons.cmd                     -> interactive menu (double-click this)
-#   ARC-Icons.ps1 -Action status      -> show state + verify
-#   ARC-Icons.ps1 -Action install     -> FULL install in one action: capture-if-fresh,
-#                                        merge the chosen variant, restore-if-switching,
-#                                        apply, refresh EVERY logged-on profile's icon +
-#                                        thumbnail cache, verify PASS
-#   ARC-Icons.ps1 -Action uninstall   -> FULL uninstall in one action: restore the
-#                                        pristine originals, refresh every logged-on
-#                                        profile, verify PASS (mode=original)
+#   ARC-Icons.cmd                     -> interactive menu (double-click this):
+#                                        1  Install theme
+#                                        2  Remove theme
+#                                        3  Check status
+#                                        4  Choose theme variant
+#                                        q  Quit
+#   ARC-Icons.ps1 -Action install     -> INSTALL   (full: capture-if-fresh, merge the
+#                                        chosen variant, restore-if-switching, apply,
+#                                        refresh EVERY logged-on profile's icon +
+#                                        thumbnail cache, verify PASS)
+#   ARC-Icons.ps1 -Action uninstall   -> UNINSTALL (full: restore the pristine
+#                                        originals, refresh every logged-on profile,
+#                                        verify PASS (mode=original))
+#   ARC-Icons.ps1 -Action status      -> read-only: show state + verify (exit non-zero
+#                                        when verification fails)
+#
+# Advanced (CLI only; not in the menu. Names and behavior unchanged):
 #   ARC-Icons.ps1 -Action apply       -> apply / re-apply the ARC icons (no variant switch)
-#   ARC-Icons.ps1 -Action revert      -> put Windows' own icons back (no full verify)
+#   ARC-Icons.ps1 -Action revert      -> put Windows' own icons back
 #   ARC-Icons.ps1 -Action repair      -> re-apply ONLY if the live payload drifted, then refresh the icon cache
 #   ARC-Icons.ps1 -Action refresh     -> rebuild every logged-on profile's shell icon cache
 #   ARC-Icons.ps1 -Action merge       -> rebuild the merged files from originals + theme
 #   ARC-Icons.ps1 -Action task-on     -> enable auto-repair at startup
 #   ARC-Icons.ps1 -Action task-off    -> disable auto-repair at startup
+#
+#   Every action exits 0 only when its whole chain succeeded. A verify FAIL after
+#   any action, a refresh that leaves a profile without explorer, a child script
+#   exiting non-zero, or a stale stage all exit non-zero.
 #   add -Yes to skip confirmations, -DryRun to preview an install/apply/uninstall.
 #   add -CleanState to uninstall to also remove state.json, installed-manifest.json
 #   and stage\ (default KEEPS them so a reinstall stays safe; originals\ is never
@@ -48,9 +60,22 @@
 # A variant installs only when its source payload is present. Selecting a
 # different variant THAN THE BUILT ONE self-chains the documented recipe —
 # merge that variant -> restore the pristine originals -> apply -> verify — so
-# the operator never has to run three commands by hand. apply.ps1 on its own
-# still refuses a live payload that is neither the recorded original nor the
-# recorded merge, because at that point live holds the PREVIOUS theme's merge.
+# the operator never has to run three commands by hand. Before that chain moves
+# anything, EVERY live payload is classified (recorded original | recorded
+# merge | unknown) and an unknown one refuses the switch, naming the file, its
+# hash and the rebase path: a switch must never clobber a newer Windows
+# payload. The chain asks ONCE, before the first mutation; declining leaves the
+# machine exactly as it was.
+# apply.ps1 on its own still refuses a live payload that is neither the
+# recorded original nor the recorded merge, because at that point live holds
+# the PREVIOUS theme's merge.
+# Stale stage: installed-manifest.json records the theme sha256 the stage was
+# merged from (sourceOrigin.files[]). Install and Apply re-hash the theme on
+# disk first; when any recorded hash disagrees (or the manifest cannot prove
+# it: no sourceOrigin, older manifest) the stage is STALE and this controller
+# re-merges the requested variant (merge -> restore -> apply -> verify) instead
+# of trusting it. apply.ps1 never re-merges by itself; it refuses with a
+# stale-stage reason and names this rebuild path.
 # On a provably-fresh machine (no state.json, no installed-manifest.json, no
 # originals\) the single apply instead captures the pristine originals first,
 # then merge -> apply -> verify, with no restore step (nothing is installed
@@ -143,6 +168,86 @@ function Get-BuiltTheme {
     if (-not $m -or -not $m.theme) { return '' }
     return [string]$m.theme
 }
+# Stale-stage check: installed-manifest.json's sourceOrigin.files[] holds the
+# sha256 of every theme file the stage was merged from. Re-hash the theme on
+# disk for the manifest's variant and report any disagreement. Returns
+# { Stale, VariantId, VariantDisplay, SourceDir, Reason, Detail }. A manifest
+# with no usable sourceOrigin is treated as stale on purpose: an unprovable
+# stage is never trusted, it is rebuilt. Never throws.
+# Kept byte-for-byte in step with the copy in apply.ps1 (same function name;
+# apply.ps1 runs as a child process, never in this process).
+function Get-ArcIconsStageStaleness($InstalledManifest, [string]$RootC) {
+    $res = [pscustomobject]@{
+        Stale = $true; VariantId = ''; VariantDisplay = ''; SourceDir = ''; Reason = ''; Detail = @()
+    }
+    $man = $InstalledManifest
+    if ($null -eq $man) {
+        $res.Reason = 'installed-manifest.json is missing, so the stage cannot be proven against the theme on disk. Rebuild it: run ARC-Icons.ps1 -Action install -Variant <id> -Yes (re-merge -> restore pristine originals -> apply -> verify).'
+        return $res
+    }
+    $vid = ''
+    if ($man.PSObject.Properties['variantId']) { $vid = [string]$man.variantId }
+    $res.VariantId = $vid
+    $vinfo = $null
+    if ($vid) { $vinfo = Get-ArcIconsVariantInfo $vid }
+    if ($vinfo) { $res.VariantDisplay = [string]$vinfo.Display }
+    elseif ($man.PSObject.Properties['theme']) { $res.VariantDisplay = [string]$man.theme }
+    $label = $vid
+    if (-not $label) { $label = '<variant>' }
+    $rebuild = ("Rebuild it: run ARC-Icons.ps1 -Action install -Variant '{0}' -Yes (re-merge -> restore pristine originals -> apply -> verify)." -f $label)
+
+    $so = $null
+    if ($man.PSObject.Properties['sourceOrigin']) { $so = $man.sourceOrigin }
+    $rows = @()
+    if ($so -and $so.PSObject.Properties['files']) { $rows = @($so.files) }
+    if ((-not $so) -or ($rows.Count -eq 0)) {
+        $res.Reason = ('installed-manifest.json carries no sourceOrigin theme hashes (older manifest), so the stage cannot be proven against the theme on disk. ' + $rebuild)
+        return $res
+    }
+    $rel = ''
+    if ($so.PSObject.Properties['sourceDir']) { $rel = [string]$so.sourceDir }
+    if ((-not $rel) -and $vinfo) { $rel = 'theme\' + $vinfo.ThemeDir }
+    if (-not $rel) {
+        $res.Reason = ('installed-manifest.json records no theme source directory (sourceOrigin.sourceDir), so the stage cannot be proven against the theme on disk. ' + $rebuild)
+        return $res
+    }
+    try { $srcDir = Resolve-ArcIconsRootChildPath $RootC $rel 'sourceOrigin.sourceDir' }
+    catch {
+        $res.Reason = ("installed-manifest.json sourceOrigin.sourceDir '{0}' is not a usable path under -Root ({1}). {2}" -f $rel, $_, $rebuild)
+        return $res
+    }
+    $res.SourceDir = $srcDir
+
+    $byName = @{}
+    foreach ($r in $rows) {
+        $n = ([string]$r.name).ToLowerInvariant()
+        if ($n) { $byName[$n] = $r }
+    }
+    $mismatch = @()
+    $missing = @()
+    foreach ($n in @('imageres.dll', 'imagesp1.dll', 'zipfldr.dll')) {
+        $row = $byName[$n]
+        if ($null -eq $row) { $missing += ("{0}: no sourceOrigin row" -f $n); continue }
+        $rec = ''
+        if ($row.PSObject.Properties['sha256']) { $rec = ([string]$row.sha256).ToUpperInvariant() }
+        if (-not $rec) { $missing += ("{0}: sourceOrigin row carries no sha256" -f $n); continue }
+        $diskPath = Join-Path $srcDir $n
+        if (-not (Test-Path -LiteralPath $diskPath -PathType Leaf)) { $missing += ("{0}: theme file missing on disk ({1})" -f $n, $diskPath); continue }
+        try { $disk = Get-ArcIconsSha256 $diskPath }
+        catch { $missing += ("{0}: theme file unreadable ({1}): {2}" -f $n, $diskPath, $_); continue }
+        if ($disk -ne $rec) { $mismatch += ("{0}: recorded {1}, theme on disk {2}" -f $n, $rec, $disk) }
+    }
+    if (($mismatch.Count -gt 0) -or ($missing.Count -gt 0)) {
+        $parts = @()
+        if ($mismatch.Count -gt 0) { $parts += ('theme hash mismatch: ' + ($mismatch -join '; ')) }
+        if ($missing.Count -gt 0) { $parts += ('recorded row missing: ' + ($missing -join '; ')) }
+        $res.Detail = @($mismatch + $missing)
+        $res.Reason = ("installed-manifest.json was merged from a different theme generation than the theme on disk on this PC ({0}). {1}" -f ($parts -join ' | '), $rebuild)
+        return $res
+    }
+    $res.Stale = $false
+    return $res
+}
 function Resolve-Variant([string]$Name) {
     $key = ([string]$Name).Trim().ToLowerInvariant() -replace '[^a-z0-9]+', '-'
     $key = $key.Trim('-')
@@ -203,9 +308,17 @@ function Test-Admin {
     return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
 }
 function Read-Choice([string]$prompt = '  choice') {
-    # a closed / exhausted stdin must quit, never hang or spin the menu
+    # a closed / exhausted stdin must quit, never hang or spin the menu: a
+    # redirected read that returns $null is EOF, and an empty line is a quit.
+    # Read-Host does NOT read a redirected stdin under -File, so redirected
+    # input uses Console.In directly (that also makes the menu scriptable).
     try {
-        if ([Console]::IsInputRedirected -and [Console]::In.Peek() -eq -1) { return 'q' }
+        if ([Console]::IsInputRedirected) {
+            $line = [Console]::In.ReadLine()
+            if ($null -eq $line) { return 'q' }
+            if (-not $line.Trim()) { return 'q' }
+            return $line
+        }
         return (Read-Host $prompt)
     } catch { return 'q' }
 }
@@ -224,6 +337,11 @@ function Stop-Visible([string]$msg, [int]$code = 1, [string]$detail = 'nothing c
     exit $code
 }
 function Show-Status {
+    # Read-only verb, but never a false OK: the verify exit code IS this
+    # action's exit code (a FAIL must reach the caller, GUI or shell). Every
+    # action resets the code here at its start, so a cancelled or previewed
+    # action returns 0 while a failure is never wiped by the menu loop.
+    $script:ExitCode = 0
     Write-Head 'ARC icon theme - status'
     $v = $script:VariantInfo
     $built = Get-BuiltTheme
@@ -248,13 +366,18 @@ function Show-Status {
     Write-Host ''
     if (-not (Test-Path $StateFile)) {
         Write-Host '  note: this folder has no state.json yet, so full verification is skipped.' -ForegroundColor Yellow
-        Write-Host '        run option 1 (apply) once - it is idempotent - to record the state and get a PASS.' -ForegroundColor Yellow
+        Write-Host '        run INSTALL once - it is idempotent - to record the state and get a PASS.' -ForegroundColor Yellow
     } else {
         & $PSExe -NoProfile -File $Verify -Root $Root -SystemResourceDir $SysDir
+        $script:ExitCode = [int]$LASTEXITCODE
+        if ($script:ExitCode -ne 0) {
+            Write-Host ("  status  : verify FAILED (exit {0}) - read the FAIL lines above." -f $script:ExitCode) -ForegroundColor Red
+        }
     }
     Write-Host ''
 }
 function Invoke-Apply {
+    $script:ExitCode = 0
     $v = $script:VariantInfo
     Write-Head "APPLY - install the ARC icon resources ($($v.Display))"
     $missing = Get-MissingVariantSource $v
@@ -279,16 +402,53 @@ function Invoke-Apply {
         if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-APPLY: FAILED (exit {0}) - see the output above." -f $LASTEXITCODE) $LASTEXITCODE 'the shell was restored; live files are rolled back to the pristine originals.' }
         return
     }
-    if ($built -ne $v.Display) {
-        # Variant switch. The built payload is pinned to one theme, so switching
-        # IS the documented recipe (restore -> merge -> apply) run for the
-        # operator: re-merge this variant, put the pristine originals back, then
-        # apply. Without the restore step apply.ps1 correctly refuses, because
-        # live would hold the PREVIOUS theme's merge.
+    # Variant switch = the documented recipe (merge -> restore -> apply) run for
+    # the operator. Nothing here mutates anything until the SINGLE confirmation
+    # in the preflight below: the old flow merged+restored first and then asked
+    # again, so declining left stock icons installed with no theme (t28).
+    # ---- preflight: nothing has been mutated yet ----
+    $switching = ($built -ne $v.Display)
+    $stale = Get-ArcIconsStageStaleness (Read-Json $InstMan) (Resolve-ArcIconsCanonicalPath $Root)
+    $rebuild = [bool]$stale.Stale
+    $liveState = Get-ArcIconsLivePayloadState
+    $needRestore = ($switching -or ($rebuild -and ($liveState -eq 'merged')))
+    Write-Host ("  target : {0}\{{imageres,imagesp1,zipfldr}}.dll.mun" -f $SysDir)
+    if ($switching) {
         Write-Host ("  variant switch: built payload is '{0}', requested '{1}'." -f $(if ($built) { $built } else { 'none' }), $v.Display)
-        Write-Host "  chain: merge this variant -> restore pristine originals -> apply (apply alone would refuse: live holds the previous theme)."
-        if ($DryRun) { Write-Host '  -DryRun: the switch would run merge -> restore -> apply; nothing changed.'; return }
-        if (-not (Confirm "Switch to '$($v.Display)' now?")) { Write-Host '  cancelled'; return }
+    }
+    if ($rebuild) {
+        # one line naming why the rebuild happens, before anything is touched
+        Write-Host ("  stale stage - rebuilding instead of trusting it: {0}" -f $stale.Reason)
+    }
+    if ($needRestore) {
+        Write-Host '  chain : merge this variant -> restore pristine originals -> apply -> verify'
+    } else {
+        Write-Host '  chain : apply the recorded stage -> verify'
+    }
+    if ($DryRun) {
+        Write-Host '  -DryRun: nothing changed.'
+        return
+    }
+    # A restore overwrites the live payload, so classify EVERY live file before
+    # any mutation: an unknown payload (Windows Update or a manual change) is
+    # never clobbered by a switch. apply.ps1 refuses it too, but only after the
+    # merge and restore would already have run.
+    if ($needRestore) {
+        $liveRows = @(Get-ArcIconsLivePayloadClassification)
+        $unknown = @($liveRows | Where-Object { $_.State -eq 'unknown' })
+        if ($unknown.Count -gt 0) {
+            $detail = (@(Format-ArcIconsUnknownLivePayload $unknown) -join "`n  ")
+            $detail += ("`n  Rebase path: bin\Rebase-ArcIconsOriginal.ps1 -Root <root> -SystemResourceDir <dir> -Name <file> -ExpectLiveHash <hash> -Commit, then re-run this switch (docs\REPAIR-MANUAL.md, ""After a Windows Update""). Nothing changed.")
+            Stop-Visible ("ARC-ICONS-SWITCH: REFUSED - at least one live payload is neither the recorded original nor the recorded merge, so a variant switch would clobber it:`n  " + $detail) 1 ''
+        }
+    }
+    # ONE confirmation, before the first mutation. Every later step is
+    # non-interactive, so there is no point at which a decline can strand the
+    # machine between merge and apply.
+    $what = 'Apply now?'
+    if ($needRestore) { $what = ("Switch to '{0}' now (merge -> restore pristine originals -> apply -> verify)?" -f $v.Display) }
+    if (-not (Confirm $what)) { Write-Host '  cancelled'; return }
+    if ($needRestore) {
         Write-Host ''
         Write-Host ("  [1/3] MERGE   - rebuild stage\ + installed-manifest.json for {0}" -f $v.Display)
         & $PSExe -NoProfile -File $Merge -Root $Root -Build -Variant $v.Id
@@ -298,15 +458,13 @@ function Invoke-Apply {
         if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-RESTORE: FAILED (exit {0}); nothing applied." -f $LASTEXITCODE) $LASTEXITCODE }
         Write-Host '  [3/3] APPLY   - install the merged payload'
     }
-    Write-Host ("  target : {0}\{{imageres,imagesp1,zipfldr}}.dll.mun" -f $SysDir)
-    if (-not (Confirm 'Apply now?')) { Write-Host '  cancelled'; return }
     $a = @('-NoProfile', '-File', $Apply, '-Root', $Root, '-SystemResourceDir', $SysDir, '-CloseHolders') + (Get-ArcIconsApplyVariantArguments $v.Id)
-    if ($DryRun) { $a += '-DryRun' }
     & $PSExe @a
     if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-APPLY: FAILED (exit {0}) - see the output above." -f $LASTEXITCODE) $LASTEXITCODE 'the shell was restored; live files are rolled back to the pristine originals.' }
     Write-Host ''
     & $PSExe -NoProfile -File $Verify -Root $Root -SystemResourceDir $SysDir
     if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-VERIFY: FAILED (exit {0}) after apply." -f $LASTEXITCODE) $LASTEXITCODE 'the payload is installed but does not verify; read the FAIL lines above before using the shell.' }
+    $script:ExitCode = 0
 }
 function Show-RefreshProfiles($r) {
     foreach ($p in @($r.Profiles)) {
@@ -314,31 +472,66 @@ function Show-RefreshProfiles($r) {
         Write-Host ("    session {0,-3} {1,-26} {2,-15} {3}  {4}" -f $p.SessionId, $p.Account, $p.Mode, $mark, $p.Note)
     }
 }
+function Get-ArcIconsLivePayloadClassification {
+    # One row per allowlisted payload: State is 'original' (live == recorded
+    # pristine original), 'merged' (live == the RECORDED merge) or 'unknown'
+    # (anything else: Windows Update, a manual edit, a missing file). A switch
+    # refuses on ANY 'unknown' before it touches the machine.
+    $man = Read-Json $OrigMan
+    $inst = Read-Json $InstMan
+    $rows = @()
+    foreach ($t in $Targets) {
+        $name = $t.Name
+        $p = Join-Path $SysDir $name
+        $h = ''
+        $state = 'unknown'
+        $note = ''
+        $orgRow = $null
+        if ($man) { $orgRow = @($man.files | Where-Object { [string]$_.name -eq $name })[0] }
+        $instRow = $null
+        if ($inst) { $instRow = @($inst.files | Where-Object { [string]$_.name -eq $name })[0] }
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) {
+            $note = 'live file missing'
+        } else {
+            try { $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToUpperInvariant() }
+            catch { $h = ''; $note = 'live hash unreadable' }
+            if ($h -and $orgRow -and ($h -eq ([string]$orgRow.originalSha256).ToUpperInvariant())) {
+                $state = 'original'
+            } elseif ($h -and $instRow -and ($h -eq ([string]$instRow.mergedSha256).ToUpperInvariant())) {
+                $state = 'merged'
+            } elseif ($h) {
+                $state = 'unknown'
+            }
+        }
+        $rows += [pscustomobject]@{ Name = $name; Live = $p; Hash = $h; State = $state; Note = $note }
+    }
+    return $rows
+}
+function Format-ArcIconsUnknownLivePayload($Rows) {
+    # file name + its actual hash for every unknown live payload (the switch
+    # refusal must let the operator run the rebase with the real value).
+    $lines = @()
+    foreach ($r in @($Rows)) {
+        $h = [string]$r.Hash
+        if (-not $h) { $h = '<unreadable>' }
+        $note = ''
+        if ($r.Note) { $note = ' (' + [string]$r.Note + ')' }
+        $lines += ("{0}: live hash {1} is neither the recorded original nor the recorded merge{2}" -f $r.Name, $h, $note)
+    }
+    return $lines
+}
 function Get-ArcIconsLivePayloadState {
     # 'original' = every live file is the pristine original; 'merged' = the rest
     # are the RECORDED merge and none is unknown; 'unknown' = at least one live
     # file matches neither (Windows Update or a manual edit) and must not be
     # overwritten by a full install.
-    $man = Read-Json $OrigMan
-    if (-not $man) { return 'unknown' }
-    $inst = Read-Json $InstMan
-    $unknown = @()
-    $merged = 0
-    foreach ($b in @($man.files)) {
-        $name = [string]$b.name
-        $p = Join-Path $SysDir $name
-        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { $unknown += $name; continue }
-        try { $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash } catch { $unknown += $name; continue }
-        if ($h -eq ([string]$b.originalSha256).ToUpperInvariant()) { continue }
-        $row = if ($inst) { $inst.files | Where-Object name -eq $name } else { $null }
-        if ($row -and $h -eq ([string]$row.mergedSha256).ToUpperInvariant()) { $merged++ }
-        else { $unknown += $name }
-    }
-    if ($unknown.Count -gt 0) { return 'unknown' }
-    if ($merged -gt 0) { return 'merged' }
+    $rows = @(Get-ArcIconsLivePayloadClassification)
+    if (@($rows | Where-Object { $_.State -eq 'unknown' }).Count -gt 0) { return 'unknown' }
+    if (@($rows | Where-Object { $_.State -eq 'merged' }).Count -gt 0) { return 'merged' }
     return 'original'
 }
 function Invoke-Install {
+    $script:ExitCode = 0
     # One action = the whole install: source check, capture-if-fresh,
     # merge the requested variant, restore-if-switching (or if live holds a
     # previous merge), apply, per-user refresh for EVERY logged-on profile,
@@ -357,10 +550,22 @@ function Invoke-Install {
     $freshMachine = (-not (Test-Path -LiteralPath $StateFile)) -and (-not (Test-Path -LiteralPath $InstMan)) -and (-not (Test-Path -LiteralPath (Join-Path $Root 'originals')))
     $switching = (-not $freshMachine) -and ($built -ne $v.Display)
     $liveState = 'unknown'
-    if (-not $freshMachine) { $liveState = Get-ArcIconsLivePayloadState }
+    $staleReason = ''
+    if (-not $freshMachine) {
+        $liveState = Get-ArcIconsLivePayloadState
+        # Same stale-stage check apply.ps1 runs. Install always re-merges, so
+        # the effect here is that an unprovable stage is named and rebuilt
+        # rather than applied on trust (t28: a 2026-10-14 stage applied after
+        # the theme was regenerated 2026-11-06).
+        $stale = Get-ArcIconsStageStaleness (Read-Json $InstMan) (Resolve-ArcIconsCanonicalPath $Root)
+        if ($stale.Stale) { $staleReason = [string]$stale.Reason }
+    }
     Write-Host ("  root   : {0}" -f $Root)
     Write-Host ("  target : {0}\{{imageres,imagesp1,zipfldr}}.dll.mun" -f $SysDir)
     Write-Host ("  state  : {0}; built variant: {1}; live payload: {2}" -f (Get-Mode), $(if ($built) { $built } else { 'none' }), $liveState)
+    if ($staleReason) {
+        Write-Host ("  stale stage - rebuilding instead of trusting it: {0}" -f $staleReason)
+    }
     if ($freshMachine) {
         Write-Host '  plan   : capture pristine originals + merge + apply -> refresh every profile -> verify'
     } elseif ($switching) {
@@ -373,7 +578,11 @@ function Invoke-Install {
         return
     }
     if ((-not $freshMachine) -and ($liveState -eq 'unknown')) {
-        Stop-Visible 'ARC-ICONS-INSTALL: REFUSED - at least one live payload is neither the recorded original nor the recorded merge (Windows Update or a manual change).' 1 'a full install will not overwrite an unknown payload. Re-capture the originals and re-merge (docs\REPAIR-MANUAL.md, "After a Windows Update"), then install again.'
+        $rows = @(Get-ArcIconsLivePayloadClassification)
+        $unknown = @($rows | Where-Object { $_.State -eq 'unknown' })
+        $detail = (@(Format-ArcIconsUnknownLivePayload $unknown) -join "`n  ")
+        $detail += ("`n  Rebase path: bin\Rebase-ArcIconsOriginal.ps1 -Root <root> -SystemResourceDir <dir> -Name <file> -ExpectLiveHash <hash> -Commit (docs\REPAIR-MANUAL.md, ""After a Windows Update""), then install again. Nothing changed.")
+        Stop-Visible ("ARC-ICONS-INSTALL: REFUSED - at least one live payload is neither the recorded original nor the recorded merge (Windows Update or a manual change):`n  " + $detail) 1 ''
     }
     if (-not (Confirm "Install '$($v.Display)' now?")) { Write-Host '  cancelled'; return }
     if (-not $freshMachine) {
@@ -411,8 +620,10 @@ function Invoke-Install {
     }
     Write-Host ''
     Write-Host '  ARC-ICONS-INSTALL: PASS'
+    $script:ExitCode = 0
 }
 function Invoke-Uninstall {
+    $script:ExitCode = 0
     # One action = full uninstall: restore the pristine originals, refresh every
     # logged-on profile, verify PASS (mode=original). -CleanState additionally
     # removes state.json / installed-manifest.json / stage\; originals\ (the only
@@ -431,7 +642,10 @@ function Invoke-Uninstall {
         Write-Host '  -DryRun: nothing changed (restore -DryRun previews live in that verb).'
         return
     }
-    if (-not (Confirm 'Uninstall now?')) { Write-Host '  cancelled'; return }
+    # Removal is the destructive direction: say plainly that the ARC icons go
+    # away and the stock Windows icons come back BEFORE asking.
+    Write-Host '  WARNING: removing the theme puts the stock Windows icons back; the ARC icons will no longer be shown.' -ForegroundColor Yellow
+    if (-not (Confirm 'Remove the ARC theme and restore the stock Windows icons now?')) { Write-Host '  cancelled'; return }
     Write-Host ''
     Write-Host ("  [1/3] RESTORE - put the pristine originals back into {0}" -f $SysDir)
     & $PSExe -NoProfile -File $Restore -Root $Root -SystemResourceDir $SysDir -CloseHolders -SkipIconCacheRefresh
@@ -468,8 +682,10 @@ function Invoke-Uninstall {
     }
     Write-Host ''
     Write-Host '  ARC-ICONS-UNINSTALL: PASS (mode=original)'
+    $script:ExitCode = 0
 }
 function Invoke-Revert {
+    $script:ExitCode = 0
     Write-Head 'REVERT - put Windows own icons back'
     Write-Host '  restores the pristine files backed up before the theme was installed'
     if (-not (Confirm 'Revert now?')) { Write-Host '  cancelled'; return }
@@ -477,10 +693,14 @@ function Invoke-Revert {
     if ($DryRun) { $a += '-DryRun' }
     & $PSExe @a
     if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-RESTORE: FAILED (exit {0}) - see the output above." -f $LASTEXITCODE) $LASTEXITCODE 'the shell was restored; live files are rolled back to the pristine originals.' }
+    if ($DryRun) { Write-Host '  -DryRun: preview only; nothing restored.'; return }
     Write-Host ''
     & $PSExe -NoProfile -File $Verify -Root $Root -SystemResourceDir $SysDir
+    if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-VERIFY: FAILED (exit {0}) after revert." -f $LASTEXITCODE) $LASTEXITCODE 'the restore ran but the live payload does not verify; follow docs\REPAIR-MANUAL.md.' }
+    $script:ExitCode = 0
 }
 function Invoke-Repair {
+    $script:ExitCode = 0
     Write-Head 'REPAIR - re-apply only when the live payload drifted, then refresh the icon cache'
     Write-Host '  classifies each live file: no-action | repaired | drift-unknown-payload'
     Write-Host '  an unknown (post-Windows-Update) payload is never overwritten'
@@ -498,8 +718,11 @@ function Invoke-Repair {
     if (@($out) -match 'ARC-ICONS-REPAIR: repaired') { Invoke-Refresh } else { Write-Host '  nothing re-applied; icon cache left alone.' }
     Write-Host ''
     & $PSExe -NoProfile -File $Verify -Root $Root -SystemResourceDir $SysDir
+    if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-VERIFY: FAILED (exit {0}) after repair." -f $LASTEXITCODE) $LASTEXITCODE 'the repair ran but the live payload does not verify; follow docs\REPAIR-MANUAL.md.' }
+    $script:ExitCode = 0
 }
 function Invoke-Refresh {
+    $script:ExitCode = 0
     Write-Head 'REFRESH - rebuild every logged-on profile''s shell icon cache'
     # one mechanism only: the shared multi-user refresh stops each profile's own
     # explorer, drops iconcache*.db AND thumbcache*.db, runs ie4uinit -show,
@@ -508,8 +731,15 @@ function Invoke-Refresh {
     Write-Host ("  {0}" -f $r.Note)
     Show-RefreshProfiles $r
     [void](Restore-ArcIconsShell 'refresh')
+    # A refresh that leaves any logged-on profile without its explorer is a
+    # FAILED action, not a note: exit non-zero and name the profile.
+    if (-not $r.Ok) {
+        Stop-Visible ("ARC-ICONS-REFRESH: FAIL - at least one logged-on profile has no verified explorer after the refresh: {0}" -f ($r.Failures -join '; ')) 1 'the profile list above names what failed; sign out/in and run these icons again.'
+    }
+    $script:ExitCode = 0
 }
 function Invoke-Merge {
+    $script:ExitCode = 0
     Write-Head 'MERGE - rebuild the merged files from the pristine originals + theme'
     Write-Host '  use this after a Windows Update replaced the originals (then re-apply)'
     $v = $script:VariantInfo
@@ -518,8 +748,11 @@ function Invoke-Merge {
     & $PSExe -NoProfile -File $Merge -Root $Root -Build -Variant $v.Id
     if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-MERGE: FAILED (exit {0}) for variant '{1}'." -f $LASTEXITCODE, $v.Display) $LASTEXITCODE }
     & $PSExe -NoProfile -File $Merge -Root $Root -Verify -Variant $v.Id
+    if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-MERGE: VERIFY FAILED (exit {0}) for variant '{1}'; the stage was rebuilt but does not verify." -f $LASTEXITCODE, $v.Display) $LASTEXITCODE }
+    $script:ExitCode = 0
 }
 function Invoke-Task($on) {
+    $script:ExitCode = 0
     if ($on) {
         Write-Head 'AUTO-REPAIR - enable at startup'
         & $PSExe -NoProfile -File $TaskOn -Root $Root -SystemResourceDir $SysDir
@@ -527,6 +760,8 @@ function Invoke-Task($on) {
         Write-Head 'AUTO-REPAIR - disable'
         & $PSExe -NoProfile -File $TaskOff
     }
+    if ($LASTEXITCODE -ne 0) { Stop-Visible ("ARC-ICONS-TASK: FAILED (exit {0}) - the scheduled task was not changed." -f $LASTEXITCODE) $LASTEXITCODE }
+    $script:ExitCode = 0
 }
 function Show-VariantMenu {
     $ids = @($Variants.Keys)
@@ -555,33 +790,23 @@ function Show-VariantMenu {
 }
 function Show-Menu {
     while ($true) {
-        Show-Status
+        Write-Head 'ARC icon theme'
+        Write-Host ("  variant : {0}  [{1}]" -f $script:VariantInfo.Display, $script:VariantInfo.Id)
         Write-Host '  What do you want to do?'
-        Write-Host '    1  INSTALL   (full: apply + refresh every logged-on profile + verify PASS)'
-        Write-Host '    2  UNINSTALL (full: restore originals + refresh every profile + verify PASS)'
-        Write-Host '    3  Apply / re-apply the ARC icons'
-        Write-Host '    4  Revert to Windows default icons'
-        Write-Host '    5  Status + verification (above)'
-        Write-Host '    6  Refresh every profile''s icon cache'
-        Write-Host '    7  Re-merge after a Windows Update'
-        Write-Host '    8  Enable auto-repair at startup'
-        Write-Host '    9  Disable auto-repair at startup'
-        Write-Host '   10  Repair (re-apply if drifted + refresh the icon cache)'
-        Write-Host '   11  Choose the icon variant (ARC / ARC Symbolic / Arc Neutral Brown / Arc Neutral Grey / Arc Dark Grey)'
+        Write-Host '    1  Install theme'
+        Write-Host '    2  Remove theme'
+        Write-Host '    3  Check status'
+        Write-Host '    4  Choose theme variant'
         Write-Host '    q  Quit'
         $c = Read-Choice '  choice'
+        # No reset here: every action resets the code itself, so a soft failure
+        # (a Show-Status verify FAIL) survives until the next action and
+        # quitting right after it exits non-zero instead of inventing an OK.
         switch ($c) {
             '1' { Invoke-Install }
             '2' { Invoke-Uninstall }
-            '3' { Invoke-Apply }
-            '4' { Invoke-Revert }
-            '5' { }
-            '6' { Invoke-Refresh }
-            '7' { Invoke-Merge }
-            '8' { Invoke-Task $true }
-            '9' { Invoke-Task $false }
-            '10' { Invoke-Repair }
-            '11' { Show-VariantMenu }
+            '3' { Show-Status }
+            '4' { Show-VariantMenu }
             { $_ -in 'q', 'Q' } { return }
             default { Write-Host '  ?' }
         }
@@ -589,6 +814,10 @@ function Show-Menu {
 }
 
 # ---- entry ----
+# One exit code for the whole run: every action sets it (0 on success, non-zero
+# on a soft failure) and hard failures exit through Stop-Visible. The final
+# `exit` below must never invent an OK.
+$script:ExitCode = 0
 $Variant = Get-ArcIconsDefaultVariant $Variant $PSBoundParameters.ContainsKey('Variant') (Get-BuiltTheme)
 $script:VariantInfo = Resolve-Variant $Variant   # fail on an unknown variant before any elevation prompt
 
@@ -643,4 +872,4 @@ try {
     # (PowerShell runs `finally` for a script `exit` — measured 2026-10-14).
     [void](Restore-ArcIconsShell 'ARC-Icons.ps1 exit')
 }
-exit 0
+exit ([int]$script:ExitCode)

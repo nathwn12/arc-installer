@@ -28,6 +28,15 @@
 # for sandbox runs / -SkipIconCacheRefresh).
 # Shell guarantee: every exit path runs Restore-ArcIconsShell, so explorer.exe is
 # never left stopped (verified restart, pid reported — see Set-BaselineSecurity).
+# Stale-stage guard: installed-manifest.json records the theme file sha256 the
+# stage was merged from (sourceOrigin.files[]). Preflight re-hashes every theme
+# file on disk for the manifest's variant and REFUSES when any recorded hash
+# differs, a recorded row is missing, or there is no sourceOrigin at all (an
+# older manifest): a stage built from a different theme generation than the one
+# on disk is a STALE STAGE, and stage+manifest agreeing with each other proves
+# nothing. -Force cannot bypass it. apply.ps1 never re-merges (it stays a
+# single-purpose command): the rebuild path is ARC-Icons.ps1 -Action install
+# -Variant <id> -Yes (merge -> restore pristine -> apply -> verify).
 # Preflight (pristine/stage hashes, 3 unique allowlisted names, owner+SDDL
 # present and parseable, sibling captured before mutation) is UNCONDITIONAL:
 # -Force can never bypass it. -Force only overrides an unexpected LIVE hash (or
@@ -70,6 +79,87 @@ function Fail-Apply([string]$Msg) {
   exit 1
 }
 
+# Stale-stage check: installed-manifest.json's sourceOrigin.files[] holds the
+# sha256 of every theme file the stage was merged from. Re-hash the theme on
+# disk for the manifest's variant and report any disagreement. Returns
+# { Stale, VariantId, VariantDisplay, SourceDir, Reason, Detail }. Treats a
+# manifest with no usable sourceOrigin as stale on purpose: an unprovable stage
+# is not trusted. Never throws: every failure becomes a stale reason.
+# Kept byte-for-byte in step with the copy in ARC-Icons.ps1 (same function name,
+# never loaded in the same process - apply.ps1 runs as a child process).
+function Get-ArcIconsStageStaleness($InstalledManifest, [string]$RootC) {
+  $res = [pscustomobject]@{
+    Stale = $true; VariantId = ''; VariantDisplay = ''; SourceDir = ''; Reason = ''; Detail = @()
+  }
+  $man = $InstalledManifest
+  if ($null -eq $man) {
+    $res.Reason = 'installed-manifest.json is missing, so the stage cannot be proven against the theme on disk. Rebuild it: run ARC-Icons.ps1 -Action install -Variant <id> -Yes (re-merge -> restore pristine originals -> apply -> verify).'
+    return $res
+  }
+  $vid = ''
+  if ($man.PSObject.Properties['variantId']) { $vid = [string]$man.variantId }
+  $res.VariantId = $vid
+  $vinfo = $null
+  if ($vid) { $vinfo = Get-ArcIconsVariantInfo $vid }
+  if ($vinfo) { $res.VariantDisplay = [string]$vinfo.Display }
+  elseif ($man.PSObject.Properties['theme']) { $res.VariantDisplay = [string]$man.theme }
+  $label = $vid
+  if (-not $label) { $label = '<variant>' }
+  $rebuild = ("Rebuild it: run ARC-Icons.ps1 -Action install -Variant '{0}' -Yes (re-merge -> restore pristine originals -> apply -> verify)." -f $label)
+
+  $so = $null
+  if ($man.PSObject.Properties['sourceOrigin']) { $so = $man.sourceOrigin }
+  $rows = @()
+  if ($so -and $so.PSObject.Properties['files']) { $rows = @($so.files) }
+  if ((-not $so) -or ($rows.Count -eq 0)) {
+    $res.Reason = ('installed-manifest.json carries no sourceOrigin theme hashes (older manifest), so the stage cannot be proven against the theme on disk. ' + $rebuild)
+    return $res
+  }
+  $rel = ''
+  if ($so.PSObject.Properties['sourceDir']) { $rel = [string]$so.sourceDir }
+  if ((-not $rel) -and $vinfo) { $rel = 'theme\' + $vinfo.ThemeDir }
+  if (-not $rel) {
+    $res.Reason = ('installed-manifest.json records no theme source directory (sourceOrigin.sourceDir), so the stage cannot be proven against the theme on disk. ' + $rebuild)
+    return $res
+  }
+  try { $srcDir = Resolve-ArcIconsRootChildPath $RootC $rel 'sourceOrigin.sourceDir' }
+  catch {
+    $res.Reason = ("installed-manifest.json sourceOrigin.sourceDir '{0}' is not a usable path under -Root ({1}). {2}" -f $rel, $_, $rebuild)
+    return $res
+  }
+  $res.SourceDir = $srcDir
+
+  $byName = @{}
+  foreach ($r in $rows) {
+    $n = ([string]$r.name).ToLowerInvariant()
+    if ($n) { $byName[$n] = $r }
+  }
+  $mismatch = @()
+  $missing = @()
+  foreach ($n in @('imageres.dll', 'imagesp1.dll', 'zipfldr.dll')) {
+    $row = $byName[$n]
+    if ($null -eq $row) { $missing += ("{0}: no sourceOrigin row" -f $n); continue }
+    $rec = ''
+    if ($row.PSObject.Properties['sha256']) { $rec = ([string]$row.sha256).ToUpperInvariant() }
+    if (-not $rec) { $missing += ("{0}: sourceOrigin row carries no sha256" -f $n); continue }
+    $diskPath = Join-Path $srcDir $n
+    if (-not (Test-Path -LiteralPath $diskPath -PathType Leaf)) { $missing += ("{0}: theme file missing on disk ({1})" -f $n, $diskPath); continue }
+    try { $disk = Get-ArcIconsSha256 $diskPath }
+    catch { $missing += ("{0}: theme file unreadable ({1}): {2}" -f $n, $diskPath, $_); continue }
+    if ($disk -ne $rec) { $mismatch += ("{0}: recorded {1}, theme on disk {2}" -f $n, $rec, $disk) }
+  }
+  if (($mismatch.Count -gt 0) -or ($missing.Count -gt 0)) {
+    $parts = @()
+    if ($mismatch.Count -gt 0) { $parts += ('theme hash mismatch: ' + ($mismatch -join '; ')) }
+    if ($missing.Count -gt 0) { $parts += ('recorded row missing: ' + ($missing -join '; ')) }
+    $res.Detail = @($mismatch + $missing)
+    $res.Reason = ("installed-manifest.json was merged from a different theme generation than the theme on disk on this PC ({0}). {1}" -f ($parts -join ' | '), $rebuild)
+    return $res
+  }
+  $res.Stale = $false
+  return $res
+}
+
 # ---- F4 path confinement: canonicalize everything, no cross-root fallback ----
 $RootC = Resolve-ArcIconsCanonicalPath $Root
 $DefaultRootC = Resolve-ArcIconsCanonicalPath $DefaultRoot
@@ -108,9 +198,16 @@ try {
   if (-not (Test-Path -LiteralPath $origManPath -PathType Leaf)) { throw 'originals\manifest.json not found.' }
   $origMan = Read-ArcIconsJsonFile $origManPath
   Assert-ArcIconsOriginalsManifest $origMan
-  if (-not (Test-Path -LiteralPath $instManPath -PathType Leaf)) { throw 'installed-manifest.json not found (merge worker has not landed it yet).' }
+  if (-not (Test-Path -LiteralPath $instManPath -PathType Leaf)) { throw ('stale stage: installed-manifest.json is missing, so the stage cannot be proven against the theme on disk. Rebuild it: run ARC-Icons.ps1 -Action install -Variant <id> -Yes (re-merge -> restore pristine originals -> apply -> verify).') }
   $instMan = Read-ArcIconsJsonFile $instManPath
   Assert-ArcIconsInstalledManifest $instMan
+  # stale stage: the stage is only trustworthy if the theme it was merged from
+  # is still the theme on disk. Checked BEFORE the baseline/stage hash loops so
+  # a regenerated theme is named as such, never masked by a later error.
+  $staleCheck = Get-ArcIconsStageStaleness $instMan $RootC
+  if ($staleCheck.Stale) {
+    throw ('stale stage: ' + $staleCheck.Reason)
+  }
   $baseline = @{}
   foreach ($b in $origMan.files) {
     $nm = [string]$b.name
@@ -194,6 +291,7 @@ $mutated = @()
 $failedName = $null
 $dirTaken = $false
 $dirBaseline = $null
+$cacheFailures = @()
 try {
   $dirBaseline = Resolve-ArcIconsDirBaselineSddl $SysC $RootC
   Enable-ArcIconsPrivileges | Out-Null
@@ -261,13 +359,24 @@ try {
   })
   # post-state refresh: never let a shell hiccup throw into the rollback catch
   # (the payload is already installed and state.json already says installed).
-  try { $cacheNote = Invoke-ArcIconsIconCacheRefresh $SysC ([bool]$SkipIconCacheRefresh) $RootC }
-  catch { $cacheNote = ("icon-cache refresh failed: {0}" -f $_) }
+  # Its result is turned into a non-zero exit AFTER the finally block below: a
+  # refresh that leaves a profile without its explorer is a failed action, not
+  # a note that still prints OK.
+  try {
+    $cache = Invoke-ArcIconsPerUserIconCacheRefresh -Root $RootC -SysDir $SysC -Skip ([bool]$SkipIconCacheRefresh)
+    $cacheNote = [string]$cache.Note
+    if (-not $cache.Ok) {
+      $cacheFailures = @($cache.Failures)
+      if ($cacheFailures.Count -eq 0) { $cacheFailures = @('one or more profiles did not return with a verified explorer') }
+    }
+  } catch {
+    $cacheNote = ("icon-cache refresh failed: {0}" -f $_)
+    $cacheFailures = @("refresh threw: $_")
+  }
   Write-ArcIconsJournal $logDir 'apply.journal.jsonl' ([ordered]@{
     ts = (Get-Date).ToString('o'); op = 'icon-cache-refresh'; note = $cacheNote
   })
   Write-Output ("  icon cache: {0}" -f $cacheNote)
-  Write-Output 'ARC-ICONS-APPLY: OK'
 } catch {
   $errMsg = "$_"
   $rbTargets = @($mutated)
@@ -363,3 +472,12 @@ if ($wasFreshInstall) {
     Fail-Apply ("ARC-ICONS-VERIFY: FAILED (exit {0}) after first install; the payload IS installed (state.json mode=installed) but does not verify - read the FAIL lines above." -f $vcode)
   }
 }
+
+# A refresh that leaves any logged-on profile without a verified explorer is a
+# failed action: the payload is installed, but the shell did not come back.
+# Checked after the finally (directory ACL restored, lock released), never
+# inside the rollback catch: the payload is NOT rolled back for a shell failure.
+if ($cacheFailures.Count -gt 0) {
+  Fail-Apply ("ARC-ICONS-APPLY: FAIL - the payload IS installed (state.json mode=installed), but the icon cache was NOT refreshed for every logged-on profile: {0}`n  sign out/in, or run ARC-Icons.ps1 -Action refresh -Yes, then re-verify." -f ($cacheFailures -join '; '))
+}
+Write-Output 'ARC-ICONS-APPLY: OK'

@@ -7,7 +7,7 @@ installed and no registry key is written.
 | Path | Role |
 |---|---|
 | `%ProgramData%\ArcIcons` | The install root: the tooling, `theme\`, `originals\`, `state.json`, `installed-manifest.json` and `logs\`. |
-| `%ProgramData%\ArcIcons\originals` | The pristine payloads captured before the first write, plus their baseline security descriptors. **This is what revert restores - never edit or delete it.** |
+| `%ProgramData%\ArcIcons\originals` | The pristine payloads captured before the first write, plus their baseline security descriptors. **This is what revert restores — never edit or delete it.** |
 | `%ProgramData%\ArcIcons\theme` | The icon-theme variants, one directory per variant. |
 | `%ProgramData%\ArcIcons\state.json` | Live install state: `installed`, `original`, `partial` or `drifted`. |
 | `%ProgramData%\ArcIcons\installed-manifest.json` | Per-file record of what was merged, plus the variant's provenance. |

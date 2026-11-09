@@ -49,7 +49,14 @@ foreach ($a in @('install', 'uninstall')) {
   Assert-Contains $gui ("RunAction(`"{0}`")" -f $a) ("src\ArcInstaller.cs wires the '{0}' action" -f $a)
 }
 Assert-Contains $gui 'installBtn' 'src\ArcInstaller.cs declares the install button'
-Assert-Contains $gui 'uninstallBtn' 'src\ArcInstaller.cs declares the uninstall button'
+# Uninstall lives in the More menu now, so pin the real wiring: the button
+# exists, its menu item is bound to OnRemoveTheme, and that handler reaches
+# RunAction("uninstall"). The loop above only proves the string exists somewhere.
+Assert-Contains $gui 'moreBtn' 'src\ArcInstaller.cs declares the More menu button'
+Assert-Contains $gui 'remove.Click += new EventHandler(OnRemoveTheme)' 'the More menu binds Remove theme to OnRemoveTheme'
+$removeHandler = [regex]::Match($gui, 'private void OnRemoveTheme\([^)]*\)\s*\{.*?\n    \}', 'Singleline')
+if (-not $removeHandler.Success) { throw 'src\ArcInstaller.cs: no OnRemoveTheme handler' }
+Assert-Contains $removeHandler.Value 'RunAction("uninstall")' 'OnRemoveTheme triggers the uninstall action'
 
 # 4. Menu offers both full actions.
 Assert-Contains $controller 'INSTALL   (full:' 'menu names full install'

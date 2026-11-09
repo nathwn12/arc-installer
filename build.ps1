@@ -58,9 +58,15 @@ foreach ($f in $rootFiles) { Copy-Rel $f.FullName $f.Name }
 Write-Host "staged root: $(@($rootFiles).Count)"
 Write-Host ("  root: " + ((@($rootFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
-$binFiles = Get-ChildItem -Path (Join-Path $Root 'bin\*.ps1') -File
+# Superseded measured reference: documented in AGENTS.md and docs\REPAIR-MANUAL.md
+# as never executed (apply.ps1 replaced them). They stay in the repo for history
+# but are not staged into the shipped payload.
+$binExcluded = @('Live-Install.ps1', 'Finalize-Security.ps1')
+$binFiles = Get-ChildItem -Path (Join-Path $Root 'bin\*.ps1') -File |
+  Where-Object { $binExcluded -notcontains $_.Name }
 foreach ($f in $binFiles) { Copy-Rel $f.FullName (Join-Path 'bin' $f.Name) }
-Write-Host "staged bin: $(@($binFiles).Count)"
+$binSkipped = @($binExcluded | Where-Object { Test-Path -LiteralPath (Join-Path $Root ('bin\{0}' -f $_)) }).Count
+Write-Host "staged bin: $(@($binFiles).Count) (excluded $binSkipped superseded: $($binExcluded -join ', '))"
 Write-Host ("  bin: " + ((@($binFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
 # payload docs: docs\<name> when present, else <name> at the root
