@@ -1,0 +1,12 @@
+{
+  "keep": [
+    {
+      "path": "ARC-Icons.cmd",
+      "why": "Product launcher users run from a checkout."
+    },
+    {
+      "path": "ARC-Icons.ps1",
+      "why": "Main entrypoint the portable payload and scheduled task invoke."
+    }
+  ]
+}
