@@ -30,7 +30,7 @@
   Re-download even when a verified archive is already cached.
 
 .EXAMPLE
-  pwsh -File .\fetch-theme.ps1
+  pwsh -File .\scripts\fetch-theme.ps1
 #>
 [CmdletBinding()]
 param([switch]$Force)
@@ -38,7 +38,9 @@ param([switch]$Force)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-$Root     = $PSScriptRoot
+# The theme tree, the download cache and the docs it copies live at the
+# repository root, one level above scripts\.
+$Root     = Split-Path -Parent $PSScriptRoot
 $ThemeDir = Join-Path $Root 'theme'
 $CacheDir = Join-Path $Root 'staging\theme-cache'
 $PacksUrl = 'https://raw.githubusercontent.com/niivu/resource-redirect-icon-themes/main/Resource%20Redirect%20themes'

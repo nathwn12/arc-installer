@@ -6,15 +6,16 @@
   Stages every file the installer ships, zips them to staging\payload.zip, and
   compiles the single-file winexe with payload.zip embedded as a resource.
 
-  -Root defaults to this script's own directory (the repository root, which holds
-  the tooling at the root, bin\, docs\ and theme\). Point it at another tree with
-  the same layout to build from there.
+  -Root defaults to the repository root (the parent of this script's directory,
+  which holds the entry points at the root, scripts\, bin\, docs\ and theme\).
+  Point it at another tree with the same layout to build from there.
 
   Run this from Windows PowerShell 5.1: csc argument quoting on PowerShell 7
   mangles the /resource: path.
 
 .PARAMETER Root
-  The tree to stage from. Defaults to the directory holding this script.
+  The tree to stage from. Defaults to the parent of the directory holding this
+  script.
 #>
 [CmdletBinding()]
 param([string]$Root)
@@ -22,13 +23,14 @@ param([string]$Root)
 $ErrorActionPreference = 'Stop'
 
 $here        = Split-Path -Parent $MyInvocation.MyCommand.Path
-if (-not $Root) { $Root = $here }   # derived here, not as a param default: $PSScriptRoot is not reliable in a param block
-$StageRoot   = Join-Path $here 'staging'
+$repo        = Split-Path -Parent $here
+if (-not $Root) { $Root = $repo }   # derived here, not as a param default: $PSScriptRoot is not reliable in a param block
+$StageRoot   = Join-Path $repo 'staging'
 $StageFiles  = Join-Path $StageRoot 'files'
 $ZipPath     = Join-Path $StageRoot 'payload.zip'
-$SrcDir      = Join-Path $here 'src'
-$DistDir     = Join-Path $here 'dist'
-$IconPath    = Join-Path $here 'icon\ArcInstaller.ico'
+$SrcDir      = Join-Path $repo 'src'
+$DistDir     = Join-Path $repo 'dist'
+$IconPath    = Join-Path $repo 'icon\ArcInstaller.ico'
 $ManifestPath= Join-Path $SrcDir 'app.manifest'
 $CsPath      = Join-Path $SrcDir 'ArcInstaller.cs'
 $OutExe      = Join-Path $DistDir 'ArcInstaller.exe'
@@ -39,7 +41,7 @@ if (-not (Test-Path -LiteralPath $CsPath -PathType Leaf)) { throw "missing $CsPa
 if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { throw "missing $ManifestPath" }
 if (-not (Test-Path -LiteralPath $IconPath -PathType Leaf)) { throw "missing $IconPath" }
 if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) { throw "missing csc $csc" }
-if (-not (Test-Path -LiteralPath (Join-Path $Root 'theme') -PathType Container)) { throw "missing $Root\theme - run fetch-theme.ps1 first" }
+if (-not (Test-Path -LiteralPath (Join-Path $Root 'theme') -PathType Container)) { throw "missing $Root\theme - run scripts\fetch-theme.ps1 first" }
 
 foreach ($d in @($StageRoot, $StageFiles, $DistDir)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
 if (Test-Path -LiteralPath $StageFiles) { Get-ChildItem -LiteralPath $StageFiles -Force | Remove-Item -Recurse -Force }
@@ -52,11 +54,21 @@ function Copy-Rel([string]$srcFull, [string]$rel) {
   Copy-Item -LiteralPath $srcFull -Destination $dest -Force
 }
 
-# tooling: root scripts, then bin\
-$rootFiles = Get-ChildItem -Path (Join-Path $Root '*') -Include '*.ps1','*.cmd' -File | Where-Object { $_.Name -ne 'fetch-theme.ps1' -and $_.Name -ne 'build.ps1' }
-foreach ($f in $rootFiles) { Copy-Rel $f.FullName $f.Name }
-Write-Host "staged root: $(@($rootFiles).Count)"
-Write-Host ("  root: " + ((@($rootFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
+# tooling: the root entry points, then scripts\, then bin\. The installed
+# payload is FLAT - the exe extracts it to %ProgramData%\ArcIcons and drives
+# ARC-Icons.ps1 there - so scripts\*.ps1 ship at the payload root. fetch-theme.ps1
+# and build.ps1 are repo-only and never staged.
+$entryFiles = Get-ChildItem -Path (Join-Path $Root '*') -Include '*.ps1','*.cmd' -File
+foreach ($f in $entryFiles) { Copy-Rel $f.FullName $f.Name }
+Write-Host "staged entry points: $(@($entryFiles).Count)"
+Write-Host ("  entry: " + ((@($entryFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
+
+$scriptsExcluded = @('fetch-theme.ps1', 'build.ps1')
+$scriptFiles = Get-ChildItem -Path (Join-Path $Root 'scripts\*.ps1') -File |
+  Where-Object { $scriptsExcluded -notcontains $_.Name }
+foreach ($f in $scriptFiles) { Copy-Rel $f.FullName $f.Name }
+Write-Host "staged scripts: $(@($scriptFiles).Count) (excluded $($scriptsExcluded -join ', '))"
+Write-Host ("  scripts: " + ((@($scriptFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
 # Superseded measured reference: documented in AGENTS.md and docs\REPAIR-MANUAL.md
 # as never executed (apply.ps1 replaced them). They stay in the repo for history

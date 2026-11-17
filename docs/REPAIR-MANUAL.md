@@ -417,7 +417,8 @@ rather than applying an unprovable stage.
   Every exit path restores and verifies the shell, so Explorer is not left
   stopped.
 - **`variant source ... is missing`.** The chosen variant's payload is absent from
-  the extracted theme tree; rebuild with `fetch-theme.ps1`, then run the new exe.
+  the extracted theme tree; rebuild it from the source checkout with
+  `scripts\fetch-theme.ps1`, then run the new exe.
 - **`needs Administrator`.** Accept the UAC prompt, or start from an elevated
   terminal.
 - **`sfc /scannow` flags a SystemResources file.** That is expected after a

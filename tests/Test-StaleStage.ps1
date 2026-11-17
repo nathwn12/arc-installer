@@ -100,7 +100,7 @@ foreach ($need in @('originals\manifest.json', 'originals\imageres.dll.mun', 'or
     }
 }
 $exe = (Get-Process -Id $PID).Path
-$apply = Join-Path $PSScriptRoot '..\apply.ps1'
+$apply = Join-Path $PSScriptRoot '..\scripts\apply.ps1'
 $merge = Join-Path $PSScriptRoot '..\bin\Merge-IconTheme.ps1'
 $icons = Join-Path $PSScriptRoot '..\ARC-Icons.ps1'
 $T = Join-Path ([IO.Path]::GetTempPath()) ('arc-stale-test-' + ([guid]::NewGuid().ToString('N').Substring(0, 8)))

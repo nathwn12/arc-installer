@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Repo layout: one `scripts\` directory.** `apply.ps1`, `build.ps1`,
+  `fetch-theme.ps1`, `install-autorepair.ps1`, `remove-autorepair.ps1`,
+  `repair.ps1`, `restore.ps1` and `verify.ps1` moved from the repository root
+  into `scripts\`; `ARC-Icons.cmd` and `ARC-Icons.ps1` stay at the root as the
+  product entry points. No behaviour change: the shipped payload is still flat
+  (`%ProgramData%\ArcIcons\apply.ps1`), `build.ps1` stages `scripts\*.ps1` to the
+  payload root, and each script resolves `bin\` from the tool root, so the
+  installed path and every installed command are unchanged.
+
 ## [0.2.2] — 2026-11-09
 
 ### Added

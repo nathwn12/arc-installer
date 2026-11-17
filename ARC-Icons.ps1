@@ -89,7 +89,8 @@
 # controller cannot add a fourth target - it carries the per-payload role and
 # the merged icon counts instead of bare names.
 #
-# Everything it calls lives beside this file; nothing is downloaded.
+# Everything it calls lives beside this file (scripts\ in a checkout); nothing
+# is downloaded.
 param(
     [ValidateSet('menu', 'install', 'uninstall', 'apply', 'revert', 'repair', 'status', 'refresh', 'merge', 'task-on', 'task-off')]
     [string]$Action = 'menu',
@@ -102,20 +103,24 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# $Tool = where the scripts live (this file + bin\); $Root = the DATA root
-# (state, manifests, originals, theme, logs). They are the same directory for a
-# normal repo/installed run and differ only for a sandbox run.
+# $Tool = the tool root (this file + bin\); $Root = the DATA root (state,
+# manifests, originals, theme, logs). They are the same directory for a normal
+# installed run and differ only for a sandbox run.
+# The installed payload is flat, so the helper scripts sit beside this file
+# there; in a checkout they live under scripts\.
 $Tool = $PSScriptRoot
 if (-not $Root) { $Root = $Tool }
 if (-not $SystemResourceDir) { $SystemResourceDir = Join-Path $env:SystemRoot 'SystemResources' }
+$ScriptDir = $Tool
+if (Test-Path -LiteralPath (Join-Path $Tool 'scripts\apply.ps1') -PathType Leaf) { $ScriptDir = Join-Path $Tool 'scripts' }
 $Bin = Join-Path $Tool 'bin'
-$Apply = Join-Path $Tool 'apply.ps1'
-$Restore = Join-Path $Tool 'restore.ps1'
-$Verify = Join-Path $Tool 'verify.ps1'
-$Repair = Join-Path $Tool 'repair.ps1'
+$Apply = Join-Path $ScriptDir 'apply.ps1'
+$Restore = Join-Path $ScriptDir 'restore.ps1'
+$Verify = Join-Path $ScriptDir 'verify.ps1'
+$Repair = Join-Path $ScriptDir 'repair.ps1'
 $Merge = Join-Path $Tool 'bin\Merge-IconTheme.ps1'
-$TaskOn = Join-Path $Tool 'install-autorepair.ps1'
-$TaskOff = Join-Path $Tool 'remove-autorepair.ps1'
+$TaskOn = Join-Path $ScriptDir 'install-autorepair.ps1'
+$TaskOff = Join-Path $ScriptDir 'remove-autorepair.ps1'
 $StateFile = Join-Path $Root 'state.json'
 $InstMan = Join-Path $Root 'installed-manifest.json'
 $OrigMan = Join-Path $Root 'originals\manifest.json'

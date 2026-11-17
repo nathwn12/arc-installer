@@ -19,7 +19,11 @@ param(
   [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'bin\Set-BaselineSecurity.ps1')
+# This script lives at the tool root in the installed payload and under scripts\
+# in a checkout; bin\ is always at the tool root.
+$Tool = $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
+. (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
 $DefaultRoot = Join-Path $env:ProgramData 'ArcIcons'
 
 function Fail-Repair([string]$Msg) { [Console]::Error.WriteLine($Msg); exit 1 }
