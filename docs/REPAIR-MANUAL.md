@@ -407,6 +407,24 @@ rather than applying an unprovable stage.
    recorded merge), the status line turns red, and the details strip opens.
    Nothing is applied then.
 
+## Common failures
+
+- **Icons look unchanged after install.** Install and remove rebuild every
+  logged-on profile's icon and thumbnail cache, then restart that profile's
+  Explorer. A profile that is not signed in is not touched: sign that user in and
+  run `-Action refresh`, or sign out and back in.
+- **Status is FAIL after install.** Read the FAIL lines, then remove the theme.
+  Every exit path restores and verifies the shell, so Explorer is not left
+  stopped.
+- **`variant source ... is missing`.** The chosen variant's payload is absent from
+  the extracted theme tree; rebuild with `fetch-theme.ps1`, then run the new exe.
+- **`needs Administrator`.** Accept the UAC prompt, or start from an elevated
+  terminal.
+- **`sfc /scannow` flags a SystemResources file.** That is expected after a
+  resource edit; remove the theme before running a repair install.
+- **Explorer is not running.** The scripts restore it before exit; if it is still
+  absent, start it with `Start-Process explorer`.
+
 ## Recovery ladder
 
 1. `ARC-Icons.ps1 -Action uninstall -Yes` (or the advanced `-Action revert`):
