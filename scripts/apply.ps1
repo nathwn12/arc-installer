@@ -68,7 +68,11 @@ param(
   [switch]$NoLock
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'bin\Set-BaselineSecurity.ps1')
+# This script lives at the tool root in the installed payload and under scripts\
+# in a checkout; bin\ is always at the tool root.
+$Tool = $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
+. (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
 $DefaultRoot = Join-Path $env:ProgramData 'ArcIcons'
 
 function Fail-Apply([string]$Msg) {
@@ -186,7 +190,7 @@ try {
     Write-Output 'ARC-ICONS-APPLY: fresh machine (no state.json, no installed-manifest.json, no originals\) - capture -> merge -> apply -> verify.'
     Invoke-ArcIconsOriginalsCapture $RootC $SysC $VariantInfo
     Write-Output ("ARC-ICONS-APPLY: fresh-machine merge for variant '{0}'" -f $VariantInfo.Display)
-    $mergePs = Join-Path $PSScriptRoot 'bin\Merge-IconTheme.ps1'
+    $mergePs = Join-Path $Tool 'bin\Merge-IconTheme.ps1'
     & $mergePs -Root $RootC -Build -Variant $VariantInfo.Id
     $mergeOk = $?
     if (-not $mergeOk) {
@@ -462,7 +466,7 @@ try {
 # here - so a verify FAIL reports without rolling back the installed files.
 if ($wasFreshInstall) {
   Write-Output 'ARC-ICONS-APPLY: fresh-machine verify'
-  $verifyPs = Join-Path $PSScriptRoot 'verify.ps1'
+  $verifyPs = Join-Path $Tool 'verify.ps1'
   $vout = & $verifyPs -Root $RootC -SystemResourceDir $SysC 2>&1
   $vok = $?
   $vcode = $LASTEXITCODE

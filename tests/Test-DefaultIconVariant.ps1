@@ -14,7 +14,7 @@ Assert-Equal (Get-ArcIconsDefaultVariant 'neutral-grey' $true 'dark-grey') 'neut
 Assert-Equal (Get-ArcIconsDefaultVariant 'dark-grey' $false 'neutral-brown') 'neutral-brown' 'installed variant precedence'
 Assert-Equal (Get-ArcIconsApplyVariantArguments 'dark-grey') @('-Variant', 'dark-grey') 'apply argument'
 
-$apply = Join-Path $PSScriptRoot '..\apply.ps1'
+$apply = Join-Path $PSScriptRoot '..\scripts\apply.ps1'
 $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($apply, [ref]$tokens, [ref]$errors)

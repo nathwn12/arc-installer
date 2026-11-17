@@ -73,7 +73,7 @@ try {
     $exe = (Get-Process -Id $PID).Path
     $rebase = Join-Path $PSScriptRoot '..\bin\Rebase-ArcIconsOriginal.ps1'
     $merge = Join-Path $PSScriptRoot '..\bin\Merge-IconTheme.ps1'
-    $apply = Join-Path $PSScriptRoot '..\apply.ps1'
+    $apply = Join-Path $PSScriptRoot '..\scripts\apply.ps1'
     $name = 'zipfldr.dll.mun'
     $srcOrig = Join-Path $src "originals\$name"
     $srcStage = Join-Path $src "stage\$name"

@@ -135,8 +135,8 @@ pwsh -NoProfile -File .\bin\New-IconThemePreview.ps1 `
 Add `-DryRun` to plan without writing. `-K` is the RGB multiply factor
 (0 < k <= 1): `1.0` is a byte-identical copy, lower is darker. `-Floor` is the
 per-group mean-luminance floor in 0..255 (`0` disables it and restores a plain
-blanket multiply). `fetch-theme.ps1` runs both steps after the upstream packs
-land, so a fresh fetch reproduces this whole variant.
+blanket multiply). `scripts\fetch-theme.ps1` runs both steps after the upstream
+packs land, so a fresh fetch reproduces this whole variant.
 
 ## Known gaps
 

@@ -25,8 +25,8 @@ Build the one-file installer from source. The fetch step needs network access on
 ```powershell
 git clone https://github.com/nathwn12/arc-installer.git
 cd arc-installer
-pwsh -NoProfile -File .\fetch-theme.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+pwsh -NoProfile -File .\scripts\fetch-theme.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
 `fetch-theme.ps1` downloads the four upstream packs, verifies every archive against a pinned SHA-256, and derives Arc Dark Grey locally. `build.ps1` stages the payload and compiles `dist\ArcInstaller.exe` — the same commands with `dist\` in front. To pin an exact version, add `git checkout v0.2.2` before fetching.
@@ -101,9 +101,9 @@ Every verb runs through the same exe: `install`, `uninstall` and `status` are th
 ## Development
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 .\dist\ArcInstaller.exe --selftest
-powershell -NoProfile -File .\verify.ps1
+powershell -NoProfile -File .\scripts\verify.ps1
 powershell -NoProfile -File .\tests\Test-VariantParity.ps1
 ```
 

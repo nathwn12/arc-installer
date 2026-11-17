@@ -36,7 +36,11 @@ param(
   [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'bin\Set-BaselineSecurity.ps1')
+# This script lives at the tool root in the installed payload and under scripts\
+# in a checkout; bin\ is always at the tool root.
+$Tool = $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
+. (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
 
 function Fail-AutoRepair([string]$Message) {
   [Console]::Error.WriteLine(("ARC-ICONS-AUTOREPAIR: FAIL {0}" -f $Message))
@@ -190,9 +194,13 @@ $RootC = Resolve-ArcIconsCanonicalPath $Root
 if (-not (Test-Path -LiteralPath $RootC -PathType Container)) {
   Fail-AutoRepair ("-Root not found: {0}." -f $RootC)
 }
-$repair = Resolve-ArcIconsCanonicalPath (Join-Path $RootC 'repair.ps1')
-if (-not (Test-ArcIconsPathInside $repair $RootC)) {
-  Fail-AutoRepair ("repair.ps1 escapes -Root: {0}." -f $repair)
+# The task action must name an absolute repair.ps1. It sits beside this script -
+# at the installed tool root, or under scripts\ in a checkout - so resolve it
+# from $Tool and keep the guard: it may not escape the data root it repairs or
+# the tool root that holds it.
+$repair = Resolve-ArcIconsCanonicalPath (Join-Path $Tool 'repair.ps1')
+if (-not ((Test-ArcIconsPathInside $repair $RootC) -or (Test-ArcIconsPathInside $repair $Tool))) {
+  Fail-AutoRepair ("repair.ps1 escapes -Root and the tool root: {0}." -f $repair)
 }
 if (-not (Test-Path -LiteralPath $repair -PathType Leaf)) {
   Fail-AutoRepair ("{0} not found." -f $repair)
