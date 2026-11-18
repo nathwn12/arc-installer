@@ -12,3 +12,5 @@ desktop.ini
 
 # theme artwork: fetched by fetch-theme.ps1, never redistributed here
 /theme/
+.seed/
+.opencode/skills/*-seed/
