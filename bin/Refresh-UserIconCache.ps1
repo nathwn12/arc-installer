@@ -1,21 +1,3 @@
-# ArcIcons Refresh-UserIconCache.ps1
-# Per-user worker. Runs INSIDE one target user's interactive session (started by
-# bin\ArcIcons-UserRefresh.ps1 through a one-shot InteractiveToken scheduled
-# task, or directly by the user), so %LOCALAPPDATA% and explorer ownership are
-# that user's by construction. It is not meant to be run by hand from another
-# account: it refuses when the requested SID is not the current token's SID.
-#
-# Sequence (measured order matters):
-#   1. stop ONLY this session's explorer (cache files are held open meanwhile);
-#   2. delete iconcache*.db AND thumbcache*.db in the profile's Explorer dir,
-#      plus the legacy %LOCALAPPDATA%\IconCache.db;
-#   3. ie4uinit.exe -show;
-#   4. start explorer.exe and wait until an explorer pid exists in THIS session;
-#   5. write a receipt JSON (deleted files, pids, ok) and exit 0/4.
-# -DryRun writes the receipt without touching the shell or any file: that is the
-# transport proof used by tests\Test-UserRefreshTransport.ps1.
-#
-# Windows PowerShell 5.1 compatible. Never writes outside the target profile.
 [CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$ProfileSid,
@@ -85,15 +67,12 @@ if ($myProfile -and ($myProfile -ine $wantProfile)) {
 $receipt.profilePath = $wantProfile
 
 if ($DryRun) {
-  # Transport proof only: no shell stop, no file delete, no registry write.
   $receipt.ok = $true
   $receipt.reason = 'dry-run'
   Write-ArcIconsRefreshReceipt $receipt
   exit 0
 }
 
-# No progress receipt: the parent polls for this file, so it must appear only
-# once, with the final verdict (an early ok=false would read as a failure).
 $r = Invoke-ArcIconsProfileCacheDrop -ProfilePath $wantProfile -SessionId $mySession
 $receipt.deleted = @($r.Deleted)
 $receipt.stoppedExplorer = @($r.Stopped)

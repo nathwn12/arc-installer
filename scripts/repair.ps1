@@ -1,26 +1,10 @@
-﻿# ArcIcons repair.ps1
-# Auto-repair entry point (run by Scheduled Task ArcIcons-Repair as SYSTEM).
-# Reads state.json + both manifests and classifies each live file:
-#   live == mergedSha256   -> healthy, nothing to do;
-#   live == originalSha256 -> safe re-apply (the payload this theme was built
-#                             from is still there; apply.ps1 needs no -Force);
-#   anything else (e.g. a newer Windows Update payload, or a missing file)
-#                             -> drift-unknown-payload: writes NOTHING, records
-#                             state.json mode=drifted, logs it, exits 0.
-# Repair NEVER force-overwrites an unknown payload: clobbering a newer Windows
-# payload with a stale merged theme would regress OS resources. A drifted
-# machine needs a human re-merge (see README), not an automatic overwrite.
-# Serialized with apply.ps1 / restore.ps1 via logs\ArcIcons.lock (held across
-# the nested apply call via its internal -NoLock switch).
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
   [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),
   [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
-# This script lives at the tool root in the installed payload and under scripts\
-# in a checkout; bin\ is always at the tool root.
 $Tool = $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
 . (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
@@ -41,7 +25,6 @@ if (-not (Test-Path -LiteralPath $SysC -PathType Container)) {
 $logDir = Join-Path $RootC 'logs'
 $lockHeld = $false
 if ($DryRun) {
-  # Preview only: no lock file, no log dir, no writes of any kind.
   $logDir = $null
 } else {
   if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
@@ -99,7 +82,6 @@ try {
   }
 
   if ($DryRun) {
-    # Classification only: per-file verdict, no journal, no state.json, no nested apply.
     foreach ($nm in @($classOf.Keys | Sort-Object)) {
       $verdict = 'drift'
       if ($classOf[$nm] -eq 'merged') { $verdict = 'healthy' }

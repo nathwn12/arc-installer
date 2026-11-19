@@ -54,10 +54,6 @@ function Copy-Rel([string]$srcFull, [string]$rel) {
   Copy-Item -LiteralPath $srcFull -Destination $dest -Force
 }
 
-# tooling: the root entry points, then scripts\, then bin\. The installed
-# payload is FLAT - the exe extracts it to %ProgramData%\ArcIcons and drives
-# ARC-Icons.ps1 there - so scripts\*.ps1 ship at the payload root. fetch-theme.ps1
-# and build.ps1 are repo-only and never staged.
 $entryFiles = Get-ChildItem -Path (Join-Path $Root '*') -Include '*.ps1','*.cmd' -File
 foreach ($f in $entryFiles) { Copy-Rel $f.FullName $f.Name }
 Write-Host "staged entry points: $(@($entryFiles).Count)"
@@ -70,9 +66,6 @@ foreach ($f in $scriptFiles) { Copy-Rel $f.FullName $f.Name }
 Write-Host "staged scripts: $(@($scriptFiles).Count) (excluded $($scriptsExcluded -join ', '))"
 Write-Host ("  scripts: " + ((@($scriptFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
-# Superseded measured reference: documented in AGENTS.md and docs\REPAIR-MANUAL.md
-# as never executed (apply.ps1 replaced them). They stay in the repo for history
-# but are not staged into the shipped payload.
 $binExcluded = @('Live-Install.ps1', 'Finalize-Security.ps1')
 $binFiles = Get-ChildItem -Path (Join-Path $Root 'bin\*.ps1') -File |
   Where-Object { $binExcluded -notcontains $_.Name }
@@ -81,7 +74,6 @@ $binSkipped = @($binExcluded | Where-Object { Test-Path -LiteralPath (Join-Path 
 Write-Host "staged bin: $(@($binFiles).Count) (excluded $binSkipped superseded: $($binExcluded -join ', '))"
 Write-Host ("  bin: " + ((@($binFiles) | ForEach-Object { $_.Name } | Sort-Object) -join ', '))
 
-# payload docs: docs\<name> when present, else <name> at the root
 $docMap = @(
   [pscustomobject]@{ Src = 'REPAIR-MANUAL.md';  Dest = 'README.md' }
   [pscustomobject]@{ Src = 'WHERE-IT-LIVES.md'; Dest = 'WHERE-IT-LIVES.md' }
@@ -94,7 +86,6 @@ foreach ($m in $docMap) {
 }
 Write-Host "staged docs: $($docMap.Count)"
 
-# theme (never the archives)
 $themeRoot = Join-Path $Root 'theme'
 $themeFiles = Get-ChildItem -LiteralPath $themeRoot -Recurse -File | Where-Object { $_.Extension -ne '.zip' }
 foreach ($f in $themeFiles) {
@@ -107,10 +98,6 @@ $total = (Get-ChildItem -LiteralPath $StageFiles -Recurse -File).Count
 Write-Host "staged total files: $total"
 if ($total -eq 0) { throw "nothing staged under $StageFiles - refusing to ship an empty payload" }
 
-# payload manifest: rel path (forward slashes) + sha256 for every staged file.
-# Embedded as payload-manifest.json so --selftest can verify hashes, not just
-# extraction. The manifest lists every file EXCEPT itself (it cannot hash
-# itself before it is written).
 $manFiles = Get-ChildItem -LiteralPath $StageFiles -Recurse -File | Sort-Object FullName
 $manRows = foreach ($f in $manFiles) {
   $rel = $f.FullName.Substring($StageFiles.Length + 1) -replace '\\', '/'

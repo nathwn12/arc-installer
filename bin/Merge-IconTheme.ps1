@@ -1,21 +1,4 @@
-﻿# Merge-IconTheme.ps1 — merge a selectable ARC (by niivu) theme variant into
-# copies of the pristine .mun originals using the Win32 resource-update API only.
-# Params: -Build (default) | -Verify | -Root (default (Join-Path $env:ProgramData 'ArcIcons')) |
-#         -Pair <name> | -Variant <arc|arc-symbolic|neutral-brown|neutral-grey|dark-grey>
-# -Variant picks the theme source directory AND the label recorded in
-# installed-manifest.json (theme + per-file themeFile + variantSource), so the
-# whole build/apply/verify pipeline stays pinned to the variant it built.
-# installed-manifest.json also carries sourceOrigin - the provenance of the
-# variant payload this build consumed: the source dir + a sha256 of every theme
-# file used, the landed variant archive's name + sha256 when that archive is
-# still on this PC (theme\ARC.zip / theme\arc-neutral-*.zip - the Archive field
-# of the variant table below), and repo/commit ONLY when the payload ships its
-# own source.json (a value that cannot be read is never invented).
-# The variant table below is the single owner of that mapping (ARC-Icons.ps1
-# keeps the operator-facing copy for the selector).
-# Never writes to C:\Windows; never modifies originals\ or theme\.
-# Writes stage\<name> copies + installed-manifest.json at the root.
-param(
+﻿param(
     [switch]$Build,
     [switch]$Verify,
     [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
@@ -31,7 +14,6 @@ if (-not $Build -and -not $Verify) { $Build = $true }
 $Root = (Resolve-Path -LiteralPath $Root).Path
 if ($Root -like 'C:\Windows*') { throw "Refusing to use a Root under C:\Windows (got '$Root')." }
 
-# ---- variant selection: one table owns the theme dir + the manifest label ----
 $VariantTable = [ordered]@{
     'arc'           = [pscustomobject]@{ Id = 'arc';           Display = 'ARC (by niivu)';    ThemeDir = 'Windhawk Resources';                   Archive = 'ARC.zip' }
     'arc-symbolic'  = [pscustomobject]@{ Id = 'arc-symbolic';  Display = 'ARC Symbolic';      ThemeDir = 'ARC Symbolic\Windhawk Resources';      Archive = 'ARC Symbolic.zip' }
@@ -73,7 +55,6 @@ if ($Pair) {
 
 $LangDefault = [uint16]0x0409
 
-# ---- Win32 interop (resource read via C# callbacks; update via Begin/Update/End) ----
 if (-not ([System.Management.Automation.PSTypeName]'ArcResMerge').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -227,8 +208,6 @@ function Free-ResPtr($r) {
     if ($r.Free) { [Runtime.InteropServices.Marshal]::FreeHGlobal($r.Ptr) }
 }
 
-# GRPICONDIR helpers: header WORD idReserved, WORD idType, WORD idCount;
-# each entry 14 bytes, nID = WORD at entry offset +12.
 function Get-GrpIconIds([byte[]]$b) {
     $ids = @()
     if ($b.Length -lt 6) { return $ids }
@@ -252,7 +231,6 @@ function Set-GrpIconId([byte[]]$b, [int]$Old, [int]$New) {
 }
 
 function Get-IconMaps($Entries) {
-    # Returns @{ DestLang=@{}; Groups=@{}; IconOrds=@{} } for types #3/#14 only.
     $destLang = @{}
     $groups = @{}
     $iconOrds = @{}
@@ -269,8 +247,6 @@ function Get-IconMaps($Entries) {
 }
 
 function Sort-RebuildEntries($Entries) {
-    # Order: numeric types ascending, then string types in first-seen order;
-    # within a type, enumeration order (stable via original index).
     $strOrder = @{}
     $next = 0
     foreach ($e in $Entries) {
@@ -316,18 +292,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
     $themeIcons = @($themeRes | Where-Object { $_.TypeForm -eq '#3' })
     $themeGroups = @($themeRes | Where-Object { $_.TypeForm -eq '#14' })
 
-    # --- collision safety: theme icon ordinals referenced by untouched dest groups ---
-    # A group directory entry declares the byte length of the RT_ICON it names, so
-    # substituting theme bytes under an ordinal an untouched group already points
-    # at is only safe when the length is identical. When it is not, that group is
-    # left declaring a stale size (measured on imageres: 7 stock groups / 27
-    # entries) and the icon renderer slices the wrong bytes, so the theme icon is
-    # moved to a fresh ordinal and every theme group that names it follows.
-    #
-    # NB: Get-GrpIconIds returns [uint16] (BitConverter), while NameInt is
-    # [int]; a Hashtable does not consider [uint16]289 and [int]289 the same key
-    # (measured), so both sides are cast to [int] or the remap silently never
-    # fires.
     $untouched = @($dest.Groups.Keys | Where-Object { -not (Test-IsThemeGroup $_ $themeGroups) })
     $protected = @{}
     foreach ($g in $untouched) {
@@ -348,8 +312,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         $id = [int]$e.NameInt
         if (-not $protected.ContainsKey($id)) { continue }
         if ($remap.ContainsKey($id)) { continue }
-        # same byte length: the untouched group's declaration stays true, so the
-        # theme art can take the ordinal in place (no duplication in the payload)
         if ($destIconLen.ContainsKey($id) -and $destIconLen[$id] -eq [uint32]$e.Data.Length) { continue }
         do { $maxUsed++ } while ($used.ContainsKey($maxUsed))
         if ($maxUsed -gt 65535) { throw "Ordinal space exhausted while remapping icon #$id." }
@@ -360,7 +322,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         foreach ($old in $remap.Keys) { Set-GrpIconId $ge.Data $old $remap[$old] }
     }
 
-    # --- copy pristine original to stage, then delete-first full rebuild ---
     $stageDir = Split-Path -Parent $stage
     if (-not (Test-Path -LiteralPath $stageDir)) { New-Item -ItemType Directory -Path $stageDir | Out-Null }
     Copy-Item -LiteralPath $orig -Destination $stage -Force
@@ -375,17 +336,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
     $committed = $false
     $h = [IntPtr]::Zero
     try {
-        # Single-write rule: within one update session each (type,name,lang) may
-        # be written exactly once (a second UpdateResource on the same key fails
-        # with code 50). Theme bytes are therefore substituted inline in the op
-        # list; genuinely-new theme entries are appended once. Measured: one
-        # session also caps out near ~3200 ops / ~23MB staged (imageres failed
-        # at PNG #5021 after ~3224 ops / ~23.4MB), while small pairs pass, and
-        # an incremental session on a rebuilt file succeeds. Ops are therefore
-        # packed into chunks (<=1200 entries and <=8MB each): chunk 0 opens
-        # with deleteExisting=TRUE, later chunks continue incrementally. Every
-        # key is still written exactly once, with the exact type/name form and
-        # language, using only the Win32 resource API.
         $themeOverlay = @{}
         foreach ($e in $themeIcons) {
             $nm = if ($e.NameIsInt -and $remap.ContainsKey([int]$e.NameInt)) { '#' + $remap[[int]$e.NameInt] } else { $e.NameForm }
@@ -405,10 +355,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
                 [void]$ops.Add(@{ TypeForm = $ov.TypeForm; TypeIsInt = $ov.TypeIsInt; NameForm = $ov.NameForm; NameIsInt = $ov.NameIsInt; Lang = [uint16]$e.Lang; Data = $ov.Data; Op = "theme-substitute $($e.TypeForm) $($e.NameForm) lang $($e.Lang)" })
             }
             elseif ($e.TypeForm -ceq 'MUI') {
-                # Measured: once a MUI entry exists (staged or committed), any
-                # later UpdateResource for type PNG fails with code 50
-                # (bisect: mui-then-png FAIL; img-then-png/img+icons/wave-then-png
-                # PASS; png-then-img+mui PASS). MUI ops go strictly last.
                 [void]$muiOps.Add(@{ TypeForm = $e.TypeForm; TypeIsInt = [bool]$e.TypeIsInt; NameForm = $e.NameForm; NameIsInt = [bool]$e.NameIsInt; Lang = [uint16]$e.Lang; Data = $e.Data; Op = "rebuild $($e.TypeForm) $($e.NameForm) lang $($e.Lang)" })
             }
             else {
@@ -418,8 +364,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         foreach ($tn in $themeOverlay.Keys) {
             if ($coveredTN.ContainsKey($tn)) { continue }
             $ov = $themeOverlay[$tn]
-            # A remapped icon has no dest entry at its new ordinal, so it lands
-            # under the language the theme itself carries, not a guessed one.
             $tlang = $LangDefault
             if ($dest.DestLang.ContainsKey($tn)) { $tlang = [uint16]$dest.DestLang[$tn] }
             elseif ($ov.ContainsKey('Lang')) { $tlang = [uint16]$ov.Lang }
@@ -439,8 +383,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         Write-Host "SESSIONS ${PairName}: $($ops.Count) ops in $($chunks.Count) chunk(s)"
         $ci = 0
         foreach ($chunk in $chunks) {
-            # 5.1-safe byte sum (Measure-Object -Property does not take a
-            # scriptblock on Windows PowerShell 5.1).
             $cb = 0
             foreach ($ce in $chunk) { $cb += $ce.Data.Length }
             Write-Host ("CHUNK {0}: {1} ops, {2} bytes, first={3} {4}, last={5} {6}" -f $ci, $chunk.Count, $cb, $chunk[0].TypeForm, $chunk[0].NameForm, $chunk[$chunk.Count-1].TypeForm, $chunk[$chunk.Count-1].NameForm)
@@ -489,7 +431,6 @@ function Invoke-MergePair($PairName, $ThemeFile) {
         if (-not $committed -and $h -ne [IntPtr]::Zero) { try { [void][ArcResMerge]::EndUpd($h, $true) } catch {} }
     }
 
-    # --- read back the merged copy for stats ---
     $mergedRes = [ArcResMerge]::Read($stage)
     $merged = Get-IconMaps $mergedRes
     $themeGroupNames = @($themeGroups | ForEach-Object { $_.NameForm } | Sort-Object -Unique)
@@ -513,8 +454,6 @@ function Test-IsThemeGroup($Name, $ThemeGroupEntries) {
     return $false
 }
 
-# GRPICONDIR directory entries as fields, so a group can be compared field by
-# field instead of byte for byte (a collision remap changes the nID field only).
 function Get-GroupEntryList([byte[]]$b) {
     $list = New-Object System.Collections.ArrayList
     if ($b.Length -lt 6) { return ,$list }
@@ -531,11 +470,6 @@ function Get-GroupEntryList([byte[]]$b) {
     return ,$list
 }
 
-# True only when a merged group differs from the theme group for one reason: the
-# nID of an entry was rewritten by the collision remap. Every other directory
-# field must be identical, and the merged icon behind the new nID must be exactly
-# as long as the theme entry declares - so a moved group cannot smuggle in a
-# wrong-size (or truncated) image.
 function Test-GroupRemapAllowed([byte[]]$mergedBytes, [byte[]]$themeBytes, [uint16]$lang, $iconLen) {
     if ($null -eq $mergedBytes -or $null -eq $themeBytes) { return $false }
     if ($mergedBytes.Length -ne $themeBytes.Length) { return $false }
@@ -559,14 +493,6 @@ function Test-GroupRemapAllowed([byte[]]$mergedBytes, [byte[]]$themeBytes, [uint
     return ($moved -gt 0)
 }
 
-# A stock group (one the theme does not provide) keeps the original directory
-# verbatim, so every entry must still declare the byte length of the RT_ICON it
-# names - that is what a length-changing substitution breaks (measured on the
-# pre-fix dark-grey merge: 27 entries across 7 stock groups). Theme-provided
-# groups are exempt: their declarations are reproduced from the theme byte for
-# byte, and the upstream ARC payload declares a few entries against renumbered
-# icons (measured: arc theme group #17 declares 74792 for a 969-byte icon), which
-# the merge must neither "fix" nor fail on.
 function Get-GroupSizeIssues($Entries, $ThemeGroupNames, [int]$limit) {
     $iconLen = @{}
     foreach ($ent in $Entries) {
@@ -594,8 +520,6 @@ function Get-GroupSizeIssues($Entries, $ThemeGroupNames, [int]$limit) {
 }
 
 function Test-PairInvariants($PairName, $ThemeFile) {
-    # Strict byte checks: (a) superset, (b) theme groups identical, (c) untouched identical.
-    # NOTE: if collision remap rewrote theme groups, (b) reports which groups differ.
     $orig  = Join-Path $Root "originals\$PairName"
     $theme = Join-Path $Root "$ThemeRel\$ThemeFile"
     $stage = Join-Path $Root "stage\$PairName"
@@ -626,8 +550,6 @@ function Test-PairInvariants($PairName, $ThemeFile) {
     foreach ($n in $tGroups.Keys) {
         if (-not $m.Groups.ContainsKey($n)) { $badT += "$n(absent)"; continue }
         if ([ArcResMerge]::BytesEqual($m.Groups[$n], $tGroups[$n])) { continue }
-        # A theme group the collision remap rewrote differs in its nID fields
-        # only; anything else is a real divergence and still fails.
         if (Test-GroupRemapAllowed $m.Groups[$n] $tGroups[$n] $tGroupLang[$n] $mIconLen) { $remappedGroups += $n; continue }
         $badT += $n
     }
@@ -666,7 +588,6 @@ if ($Verify) {
         foreach ($l in $r.Lines) { Write-Output $l }
         if (-not $r.Ok) { $allOk = $false }
     }
-    # manifest consistency: staged hashes must match installed-manifest.json
     $mf = Join-Path $Root 'installed-manifest.json'
     if (Test-Path -LiteralPath $mf) {
         try {
@@ -689,7 +610,6 @@ if ($Verify) {
     exit 0
 }
 
-# ---- Build (zipfldr -> imagesp1 -> imageres; verify each pair before the next) ----
 $results = @()
 foreach ($p in $Pairs) {
     $r = Invoke-MergePair $p.Name $p.Theme
@@ -702,9 +622,6 @@ foreach ($p in $Pairs) {
     if (-not $chkNow.Ok) { throw "Build verification failed for '$($p.Name)' — STOPPING before the next pair." }
 }
 
-# installed-manifest.json — the record of WHICH variant this build is pinned to
-# (theme = label, variantSource = theme dir, per-file themeFile = exact input),
-# so apply.ps1 / verify.ps1 / repair.ps1 never have to guess from originals\.
 $files = @()
 $originFiles = @()
 foreach ($r in $results) {
@@ -737,12 +654,6 @@ foreach ($r in $results) {
     }
 }
 
-# ---- pair-only rebuild: the manifest keeps all THREE rows, never drops rows ----
-# A -Pair build writes ONE stage file, but installed-manifest.json is the record
-# of all three files. Folding the rebuilt row into the existing manifest is only
-# sound when every UNTOUCHED row still matches its stage file on disk: otherwise
-# the build is stale and apply.ps1 would refuse that pair at preflight - so throw
-# instead of writing a manifest that claims a state the disk does not have.
 $mfPath = Join-Path $Root 'installed-manifest.json'
 $existingMan = $null
 if ($Pair) {
@@ -779,12 +690,6 @@ if ($Pair) {
     $files = $mergedRows
 }
 
-# ---- sourceOrigin: the applied theme's provenance is never blank ----
-# Always: the variant source dir + a sha256 of every theme file this build
-# consumed (so the exact payload can be re-fetched and re-checked). The landed
-# variant archive adds its name + sha256 while theme\<Archive> is still here.
-# repo/commit come ONLY from the payload's own source.json - a value that is not
-# readable is left out, never guessed.
 $sourceOrigin = [ordered]@{ sourceDir = $ThemeRel }
 $sourceOrigin['files'] = $originFiles
 $zipCandidate = Join-Path $Root ("theme\{0}" -f $VariantInfo.Archive)
@@ -794,10 +699,6 @@ if ($VariantInfo.Archive -and (Test-Path -LiteralPath $zipCandidate -PathType Le
         sha256 = (Get-FileHash -LiteralPath $zipCandidate -Algorithm SHA256).Hash
     }
 } elseif ($VariantInfo.Archive) {
-    # The landed archive is usually NOT under theme\ (fetch caches zips in
-    # staging\theme-cache and build never ships them). Fall back to the
-    # fetch-time pin in theme\source.json - recorded provenance, not invention:
-    # only the name + sha256 fetch pinned are recorded, and only when readable.
     $fetchProvenance = Join-Path $Root 'theme\source.json'
     if (Test-Path -LiteralPath $fetchProvenance -PathType Leaf) {
         try {
@@ -837,9 +738,6 @@ $manifest = [ordered]@{
     files         = $files
 }
 if ($existingMan) {
-    # Pair-only rebuild: the header (theme + variant + sourceOrigin) describes the
-    # payload the UNTOUCHED rows came from. Keep it rather than claim this
-    # one-pair rebuild re-verified provenance it never read.
     $manifest.theme = [string]$existingMan.theme
     $manifest.variantId = [string]$existingMan.variantId
     $manifest.variantSource = [string]$existingMan.variantSource

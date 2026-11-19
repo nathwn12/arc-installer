@@ -1,9 +1,4 @@
-﻿# Test-ResourceInvariants.ps1 — read-only resource-byte comparison.
-# CLI: -Original <pe> -Merged <pe> -Theme <pe>
-# Prints one line per check + final ARC-ICONS-INVARIANT: PASS|FAIL, exit 0|1.
-# Safe to point at live files (e.g. C:\Windows\SystemResources\<name>): opens
-# read-only via LoadLibraryEx and always frees the module. Writes nothing.
-param(
+﻿param(
     [Parameter(Mandatory = $true)][string]$Original,
     [Parameter(Mandatory = $true)][string]$Merged,
     [Parameter(Mandatory = $true)][string]$Theme
@@ -139,8 +134,6 @@ function Get-Groups($Entries) {
     return $g
 }
 
-# GRPICONDIR directory entries as fields: a collision remap rewrites one 2-byte
-# field (nID) and the comparison must be able to tell that apart from corruption.
 function Get-GroupEntryList([byte[]]$b) {
     $list = New-Object System.Collections.ArrayList
     if ($b.Length -lt 6) { return ,$list }
@@ -157,12 +150,6 @@ function Get-GroupEntryList([byte[]]$b) {
     return ,$list
 }
 
-# A merged group may differ from the theme group for exactly one reason: the
-# collision remap rewrote an entry's nID because the theme icon had a different
-# byte length than the stock icon an untouched group still names. Everything
-# else must match, and the merged icon behind the new nID must be exactly as long
-# as the theme entry declares - so this cannot hide a wrong-size or truncated
-# image.
 function Test-GroupRemapAllowed([byte[]]$mergedBytes, [byte[]]$themeBytes, [uint16]$lang, $iconLen) {
     if ($null -eq $mergedBytes -or $null -eq $themeBytes) { return $false }
     if ($mergedBytes.Length -ne $themeBytes.Length) { return $false }
@@ -186,14 +173,6 @@ function Test-GroupRemapAllowed([byte[]]$mergedBytes, [byte[]]$themeBytes, [uint
     return ($moved -gt 0)
 }
 
-# A stock group (the theme does not provide it) keeps the original directory
-# verbatim, so every entry must still declare the byte length of the RT_ICON it
-# names: that is exactly what a length-changing icon substitution breaks (the
-# pre-fix dark-grey merge broke 27 entries across 7 stock groups). Theme-provided
-# groups are exempt because their declarations are reproduced from the theme byte
-# for byte - the upstream ARC payload declares a few entries against renumbered
-# icons (measured: arc theme group #17 declares 74792 for a 969-byte icon), and a
-# merge must neither "fix" that nor fail on it.
 function Get-GroupSizeIssues($Entries, $ThemeGroupNames, [int]$limit) {
     $iconLen = @{}
     foreach ($ent in $Entries) {
@@ -235,13 +214,10 @@ foreach ($e in $tE) { if ($e.TypeForm -eq '#14' -and -not $tGLang.ContainsKey($e
 $mIconLen = @{}
 foreach ($e in $mE) { if ($e.TypeForm -eq '#3') { $mIconLen["$($e.NameForm)|$($e.Lang)"] = [uint32]$e.Data.Length } }
 
-# (a) merged group-name set is a superset of the original group-name set
 $missing = @($oG.Keys | Where-Object { -not $mG.ContainsKey($_) })
 if ($missing.Count -eq 0) { Write-Output "CHECK group-names-superset: PASS (original $($oG.Count), merged $($mG.Count))" }
 else { Write-Output "CHECK group-names-superset: FAIL (missing $($missing.Count): $($missing -join ','))"; $fail = $true }
 
-# (b) every theme-provided group is present in merged and either byte-identical
-# or differs only by the collision remap's nID rewrite (see Test-GroupRemapAllowed)
 $badT = @()
 $remappedT = @()
 foreach ($n in $tG.Keys) {
@@ -257,7 +233,6 @@ if ($badT.Count -eq 0) {
 }
 else { Write-Output "CHECK theme-groups-identical: FAIL ($($tG.Count - $badT.Count)/$($tG.Count) match; differ: $($badT -join ','))"; $fail = $true }
 
-# (c) every group the theme does NOT provide is byte-identical to the original
 $badO = @()
 foreach ($n in $oG.Keys) {
     if ($tG.ContainsKey($n)) { continue }
@@ -267,12 +242,6 @@ $untouched = $oG.Count - @($oG.Keys | Where-Object { $tG.ContainsKey($_) }).Coun
 if ($badO.Count -eq 0) { Write-Output "CHECK original-groups-preserved: PASS ($untouched untouched)" }
 else { Write-Output "CHECK original-groups-preserved: FAIL (differ: $($badO -join ','))"; $fail = $true }
 
-# (c2) all-resources-preserved: every original (type,name,lang) entry survives,
-# except type 3/14 entries whose name the theme provides. Those must carry the
-# theme's bytes, with one documented exception: when the theme icon at that
-# ordinal was moved by the collision remap (its byte length did not fit the
-# untouched stock group that names it), the original bytes stay put and no merged
-# theme group may still point at that ordinal.
 function Get-ResKey($e) { return "$($e.TypeForm)`0$($e.NameForm)`0$($e.Lang)" }
 $dictCmp = [System.StringComparer]::Ordinal
 $oMap = New-Object 'System.Collections.Generic.Dictionary[string,object]' ($dictCmp)
@@ -286,7 +255,6 @@ foreach ($e in $tE) {
     if (-not $themeByTN.ContainsKey($k)) { $themeByTN[$k] = $e }
 }
 
-# ordinals the MERGED theme groups still name: those icons must be theme bytes
 $themeGroupIcons = @{}
 foreach ($n in $tG.Keys) {
     if (-not $mG.ContainsKey($n)) { continue }
@@ -305,8 +273,6 @@ $diffR = @()
 $themeOverR = 0
 $remapKeptR = 0
 foreach ($k in $oMap.Keys) {
-    # NB: $oe/$te would overwrite the $oE/$tE entry lists - PowerShell names are
-    # case-insensitive - so the picked entries get distinct names.
     $origEnt = $oMap[$k]
     if (($origEnt.TypeForm -eq '#3' -or $origEnt.TypeForm -eq '#14') -and $themeByTN.ContainsKey("$($origEnt.TypeForm)`0$($origEnt.NameForm)")) {
         $thmEnt = $themeByTN["$($origEnt.TypeForm)`0$($origEnt.NameForm)"]
@@ -336,8 +302,6 @@ else {
     $fail = $true
 }
 
-# (c3) nothing is invented: every merged entry the original did not have must be
-# bytes the theme actually provides (a remapped icon, a theme-added group).
 $badNew = @()
 foreach ($k in $mMap.Keys) {
     if ($oMap.ContainsKey($k)) { continue }
@@ -366,13 +330,10 @@ else {
     $fail = $true
 }
 
-# (e) structural: a stock group keeps the original directory verbatim, so every
-# entry must still declare the byte length of the RT_ICON it names.
 $sizeCheck = Get-GroupSizeIssues $mE $tG 6
 if ($sizeCheck.Bad.Count -eq 0) { Write-Output "CHECK merged-stock-group-sizes: PASS ($($sizeCheck.Checked) stock-group directory entries declare their RT_ICON length)" }
 else { Write-Output "CHECK merged-stock-group-sizes: FAIL ($($sizeCheck.Bad -join ','))"; $fail = $true }
 
-# (d) merged loads both ways and enumerates its types
 try {
     $d = [ArcResTest]::ReadDataFile($Merged)
     $types = @($d | ForEach-Object { $_.TypeForm } | Sort-Object -Unique)

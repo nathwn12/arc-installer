@@ -1,8 +1,3 @@
-# Test-VariantParity.ps1 — the variant table is triple-duplicated by design
-# (ARC-Icons.ps1 $Variants, bin\Merge-IconTheme.ps1 $VariantTable,
-# bin\Set-BaselineSecurity.ps1 Get-ArcIconsVariantInfo); this test pins all
-# three to the same ids + ThemeDir mapping. Windows PowerShell 5.1 compatible,
-# no new dependencies. Run: powershell -NoProfile -File tests\Test-VariantParity.ps1
 $ErrorActionPreference = 'Stop'
 
 $Root = Split-Path -Parent $PSScriptRoot
@@ -23,8 +18,6 @@ function Assert-Equal($Actual, $Expected, [string]$Message) {
   }
 }
 
-# Read the two literal tables out of the file text (no execution: ARC-Icons.ps1
-# self-elevates and Merge-IconTheme.ps1 merges on load-args, so regex, not run).
 function Get-VariantTableFromFile([string]$Path) {
   $text = Get-Content -LiteralPath $Path -Raw
   $rows = [ordered]@{}
@@ -45,7 +38,6 @@ foreach ($id in $ExpectedIds) {
   Assert-Equal $merge[$id] $ExpectedDirs[$id] ("Merge-IconTheme.ps1 ThemeDir for '{0}'" -f $id)
 }
 
-# The function source of truth: dot-source is side-effect free by file header.
 . (Join-Path $Root 'bin\Set-BaselineSecurity.ps1')
 foreach ($id in $ExpectedIds) {
   $v = Get-ArcIconsVariantInfo $id
@@ -55,8 +47,6 @@ foreach ($id in $ExpectedIds) {
 }
 if ($null -ne (Get-ArcIconsVariantInfo 'not-a-variant')) { throw 'Get-ArcIconsVariantInfo must return null for an unknown name.' }
 
-# Presence: on a fetched tree every variant must have its three payload files.
-# A clone has no theme\ at all (gitignored); that is not a parity failure.
 $themeRoot = Join-Path $Root 'theme'
 if (Test-Path -LiteralPath $themeRoot -PathType Container) {
   foreach ($id in $ExpectedIds) {

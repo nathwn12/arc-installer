@@ -11,9 +11,6 @@ using System.Text;
 using System.Windows.Forms;
 using Microsoft.Win32.SafeHandles;
 
-// A payload that fails verification never reaches the install tree. Its own
-// type so Main can name the cause and exit non-zero instead of dying with an
-// unhandled exception (a winexe would show a crash box and leave files behind).
 sealed class PayloadIntegrityException : Exception
 {
     public PayloadIntegrityException(string message) : base(message) { }
@@ -21,9 +18,6 @@ sealed class PayloadIntegrityException : Exception
 
 static class Program
 {
-    // Exit codes: 2 = embedded payload failed verification (nothing written),
-    // 3 = extraction/install failed for another reason. 1 is still the
-    // --selftest and --cli failure code.
     private const int ExitPayloadUntrusted = 2;
     private const int ExitExtractFailed = 3;
 
@@ -35,9 +29,6 @@ static class Program
             return DoSelfTest();
         }
         bool cli = args.Length > 0 && args[0] == "--cli";
-        // --extract is the headless seam tests and the release lane use to run
-        // the real launch path (verify, then extract, then stop) without the UI
-        // and without running ARC-Icons.ps1. It writes only the tool tree.
         bool extractOnly = args.Length > 0 && args[0] == "--extract";
         try
         {
@@ -68,10 +59,6 @@ static class Program
         return 0;
     }
 
-    // A failed launch must still name its reason. stderr carries it for --cli,
-    // --extract and any redirected caller; a person double-clicking a winexe
-    // gets the same text in a box. A redirected stderr means a machine is
-    // listening, so no box is shown then (tests would otherwise block on it).
     static void ReportFatal(string message)
     {
         try
@@ -95,9 +82,6 @@ static class Program
 
     static string GetToolRoot()
     {
-        // Test seam only: the real launch always installs under ProgramData.
-        // The embedded payload is verified either way, so an override cannot
-        // smuggle bytes into the target tree; it only redirects the target.
         string overrideRoot = Environment.GetEnvironmentVariable("ARCINSTALLER_TOOL_ROOT");
         if (!string.IsNullOrEmpty(overrideRoot))
         {
@@ -170,12 +154,6 @@ static class Program
 
     private const string ManifestEntryName = "payload-manifest.json";
 
-    // Decompressed-size ceiling for the embedded payload, enforced before a
-    // single entry is decompressed. Measured on this build (2026-11-07):
-    // staging\files holds 51 files totalling 172,570,225 bytes (164.6 MiB);
-    // 4x that is 690,280,900 bytes, and 704 MiB leaves headroom for a theme
-    // revision that adds a few icon packs while still refusing a bomb (a 4 GiB
-    // payload is ~6x over). Raise it only with a new measurement in this comment.
     private const long PayloadUncompressedCap = 704L * 1024 * 1024;
 
     static bool IsHex64(string s)
@@ -201,10 +179,6 @@ static class Program
         return name.Replace('\\', '/');
     }
 
-    // Manifest and archive paths are relative and forward-slashed by build.ps1.
-    // Anything absolute, drive-qualified or carrying a ".." component is not a
-    // file this installer ever ships, so it fails closed instead of being
-    // silently skipped.
     static bool IsUnsafeRelativePath(string rel)
     {
         if (string.IsNullOrEmpty(rel))
@@ -239,16 +213,6 @@ static class Program
         }
     }
 
-    // The one payload gate. Called on every launch (GUI, --cli, --extract) and
-    // by --selftest, before any file is created. Returns the SHA-256 this
-    // archive must produce for every entry, including the manifest itself, so
-    // extraction can verify the bytes it writes instead of trusting them.
-    //
-    // Checks, in order: entry paths stay under the install root, the sum of
-    // declared sizes fits the zip-bomb cap, payload-manifest.json exists and
-    // parses, every manifest row names a file with a well-formed digest, every
-    // archive entry has a row, every entry hashes to its row, and every row has
-    // an entry. First failure throws with the path and both digests.
     static Dictionary<string, string> ValidatePayloadArchive(ZipArchive z)
     {
         long total = 0;
@@ -362,10 +326,6 @@ static class Program
         }
 
         Dictionary<string, string> expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // The manifest cannot hash itself, so its own bytes are trusted only to
-        // the extent that every row they declare matches the archive. Record
-        // the digest of the bytes we actually parsed so extraction still writes
-        // exactly what was validated.
         expected.Add(ManifestEntryName, HashBytes(manBytes));
         foreach (ZipArchiveEntry e in z.Entries)
         {
@@ -436,9 +396,6 @@ static class Program
         }
     }
 
-    // A junction or symlink anywhere on the path to the tool root would send
-    // the verified payload somewhere else, so the root is refused if any
-    // existing component is a reparse point. Cheap: a few attribute reads.
     static void EnsureSafeToolRoot(string root)
     {
         string cur = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar);
@@ -479,9 +436,6 @@ static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleFileInformation info);
 
-    // An existing destination that is a symlink or has more than one hardlink
-    // is not a file this installer wrote: writing through it would land on
-    // whatever it points at. Reject rather than repair; the tree is untrusted.
     static void EnsureSafeTarget(string path)
     {
         if (HasReparsePoint(path))
@@ -521,9 +475,6 @@ static class Program
         }
     }
 
-    // Writes the entry to a sibling temp file, hashes the bytes as they land,
-    // and only then moves it into place. The bytes that reach the tool tree are
-    // the bytes the manifest already vouched for, never an unverified stream.
     static void WriteVerifiedEntry(ZipArchiveEntry e, string fullDest, string expectedHash)
     {
         string dir = Path.GetDirectoryName(fullDest);
@@ -596,7 +547,6 @@ static class Program
             }
             using (ZipArchive z = new ZipArchive(rs, ZipArchiveMode.Read))
             {
-                // Verify everything before the first byte is written.
                 Dictionary<string, string> expected = ValidatePayloadArchive(z);
 
                 string root = GetToolRoot();
@@ -673,8 +623,6 @@ static class Program
                 }
                 using (ZipArchive z = new ZipArchive(rs, ZipArchiveMode.Read))
                 {
-                    // Same gate the real launch runs, ahead of any extraction,
-                    // so a tampered payload fails here without leaving a file.
                     try
                     {
                         ValidatePayloadArchive(z);
@@ -744,9 +692,6 @@ static class Program
             {
                 return 1;
             }
-            // Payload integrity: every extracted file must match the hash
-            // build.ps1 recorded in payload-manifest.json. Extraction alone
-            // proves nothing about content; this closes that gap.
             string manPath = Path.Combine(dir, "payload-manifest.json");
             if (!File.Exists(manPath))
             {
@@ -780,7 +725,6 @@ static class Program
                 }
                 verified++;
             }
-            // No extra files beyond the manifest (drift visible both ways).
             string[] onDisk = Directory.GetFiles(dir, "*", SearchOption.AllDirectories);
             int extra = 0;
             foreach (string f in onDisk)
@@ -863,10 +807,6 @@ static class Program
         }
     }
 
-    // Minimal manifest reader: payload-manifest.json is written by build.ps1 as
-    // {"generated": "...", "files": [{"path": "...", "sha256": "..."}, ...]}.
-    // No JSON library on this target; entries are read as ordered path/sha256
-    // pairs and every value is re-checked by the caller. Never trusts shape.
     static List<string[]> ParseManifestPairs(string json)
     {
         List<string[]> pairs = new List<string[]>();
@@ -916,8 +856,6 @@ static class Program
         {
             return null;
         }
-        // Manifest values come from file names and hex digests; no escape
-        // handling is needed, and an escape would fail closed below.
         int q2 = json.IndexOf('"', q1 + 1);
         if (q2 < 0)
         {
@@ -992,8 +930,6 @@ static class Program
         }
     }
 
-    // Display-only: the manifest stores a round-trip ISO stamp; a person reads
-    // "15:16", not "2026-10-14T15:16:47.9091925+08:00". Never rewrites state.
     static string HumanizeStamp(string iso)
     {
         if (string.IsNullOrEmpty(iso))
@@ -1013,8 +949,6 @@ static class Program
         return local.ToString("d MMM HH:mm");
     }
 
-    // Read-only accessor for the UI: the installed variant id, or "" when the
-    // manifest is absent or unreadable. Never writes state.
     public static string InstalledVariantId(string toolRoot)
     {
         try
@@ -1037,8 +971,6 @@ static class Program
 
 class MainForm : Form
 {
-    // One dark palette, used everywhere: the state dot and the failure bar are
-    // the only places colour carries meaning, and both always sit beside words.
     private static readonly Color Bg = Color.FromArgb(0x1E, 0x1E, 0x1E);
     private static readonly Color Fg = Color.FromArgb(0xE8, 0xE8, 0xE8);
     private static readonly Color PanelBg = Color.FromArgb(0x2D, 0x2D, 0x2D);
@@ -1077,8 +1009,6 @@ class MainForm : Form
     private Color dotColor = Sub;
     private bool detailsOpen;
     private bool failureVisible;
-    // 0 until measured from the autoscaled form width, then held constant so a
-    // relayout at 150% keeps its proportions instead of snapping to 96 dpi.
     private float uiScale;
     private bool sawFailureSignal;
     private string firstErrorLine;
@@ -1105,12 +1035,6 @@ class MainForm : Form
     private const uint LoadLibraryAsDatafile = 0x00000002;
     private const int RtIcon = 3;
     private const int RtGroupIcon = 14;
-    // The preview glyph is an RT_GROUP_ICON resource ID, NOT an ExtractIconEx index.
-    // Measured against the glyph Explorer actually draws for a plain folder
-    // (SHGetFileInfo SHGFI_ICON -> 32x32, meanRGB 90,90,90): ids 3/4/143/190 match
-    // it at 95.90% exact ARGB, and id 3 tracks the theme recolor
-    // (arc 111,161,221 -> neutral-brown 220,170,111 -> neutral-grey 165,165,165 ->
-    // dark-grey 90,90,90). Id 28 is the SD-card glyph and matched nothing.
     private const int FolderGlyphGroupId = 3;
 
     private static byte[] ReadResourceBytes(IntPtr hMod, IntPtr hRes)
@@ -1201,13 +1125,10 @@ class MainForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        // The form has autoscaled by now; measure once from its real width.
         this.uiScale = 0F;
         ApplyLayout();
     }
 
-    // The window chrome X and Esc close the app: there is no Exit button in the
-    // action row, so Escape has to work from anywhere in the form.
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
         if (keyData == Keys.Escape)
@@ -1218,8 +1139,6 @@ class MainForm : Form
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    // The dropdown opens on what is actually installed, never a hardcoded
-    // first item. Read-only: the same manifest StatusText reads.
     private void PreselectInstalledVariant()
     {
         int idx = 0;
@@ -1252,8 +1171,6 @@ class MainForm : Form
         this.FormBorderStyle = FormBorderStyle.FixedSingle;
         this.MaximizeBox = false;
         this.StartPosition = FormStartPosition.CenterScreen;
-        // DPI scaling: the 96 dpi design below is the baseline, so 150/200%
-        // scales every control instead of clipping the action band.
         this.AutoScaleDimensions = new SizeF(96F, 96F);
         this.AutoScaleMode = AutoScaleMode.Dpi;
         this.ClientSize = new Size(DesignWidth, 188);
@@ -1271,8 +1188,6 @@ class MainForm : Form
         {
         }
 
-        // Identity: the variant glyph at a size a person can actually judge,
-        // with its variant name under it. The name is a caption, not a control.
         this.previewBox = new PictureBox();
         this.previewBox.Location = new Point(16, 16);
         this.previewBox.Size = new Size(72, 72);
@@ -1310,8 +1225,6 @@ class MainForm : Form
         this.variantBox.SelectedIndexChanged += new EventHandler(OnVariantChanged);
         this.Controls.Add(this.variantBox);
 
-        // State line 1: a dot plus a word. The colour restates the word; it
-        // never carries the meaning alone.
         this.stateDot = new Label();
         this.stateDot.Text = "";
         this.stateDot.BackColor = Bg;
@@ -1327,8 +1240,6 @@ class MainForm : Form
         this.stateLine1.TabStop = false;
         this.Controls.Add(this.stateLine1);
 
-        // State line 2: the last result. The line exists before anything runs,
-        // and it never claims OK without a real exit 0.
         this.stateLine2 = new Label();
         this.stateLine2.Text = "Last result: \u2014";
         this.stateLine2.ForeColor = Sub;
@@ -1337,8 +1248,6 @@ class MainForm : Form
         this.stateLine2.TabStop = false;
         this.Controls.Add(this.stateLine2);
 
-        // Failure bar: red, inline, above the action band. Hidden until an
-        // action actually fails, so it can never be missed or mistaken for OK.
         this.failureBar = new Panel();
         this.failureBar.BackColor = DangerBar;
         this.failureBar.Visible = false;
@@ -1362,7 +1271,6 @@ class MainForm : Form
         this.failureBar.Controls.Add(this.showDetailsLink);
         this.Controls.Add(this.failureBar);
 
-        // Exactly one primary: Install theme absorbs Apply and Install all.
         this.installBtn = MakeBtn("Install theme", Accent, Color.White, true);
         this.installBtn.Click += new EventHandler(OnInstallClick);
         this.statusBtn = MakeBtn("Check status", PanelBg, Fg, false);
@@ -1370,7 +1278,6 @@ class MainForm : Form
         this.moreBtn = MakeBtn("More \u25BE", PanelBg, Fg, false);
         this.moreBtn.Click += new EventHandler(OnMoreClick);
 
-        // The log is a strip, shut by default - no permanent empty void.
         this.detailsBtn = new Button();
         this.detailsBtn.Text = "Details \u25B8";
         this.detailsBtn.FlatStyle = FlatStyle.Flat;
@@ -1394,8 +1301,6 @@ class MainForm : Form
         this.outputBox.Visible = false;
         this.Controls.Add(this.outputBox);
 
-        // Overflow: destructive and occasional verbs live behind one menu, so
-        // they cannot compete with Install theme for the same click.
         this.moreMenu = new ContextMenuStrip();
         this.moreMenu.BackColor = PanelBg;
         this.moreMenu.ForeColor = Fg;
@@ -1414,7 +1319,6 @@ class MainForm : Form
         this.moreMenu.Items.Add(logs);
         this.moreBtn.ContextMenuStrip = this.moreMenu;
 
-        // Tab order is the reading order of the card.
         this.variantBox.TabIndex = 0;
         this.installBtn.TabIndex = 1;
         this.statusBtn.TabIndex = 2;
@@ -1453,9 +1357,6 @@ class MainForm : Form
         return new Rectangle(S(x, s), S(y, s), S(w, s), S(h, s));
     }
 
-    // One layout routine owns every position and the window height, so the
-    // failure bar appearing moves the action band down instead of overlapping
-    // the state lines. Expanded height is the log strip, never a second row.
     private void ApplyLayout()
     {
         if (this.uiScale <= 0F)
@@ -1581,10 +1482,6 @@ class MainForm : Form
         Attention
     }
 
-    // Health is read from the same manifest StatusText reads. "Drift" here is
-    // the loudest cheap signal available without running an action: the
-    // manifest claims a variant whose theme payload is no longer on disk, or
-    // the manifest itself cannot be read. Both mean the card must not say OK.
     private Health ComputeHealth(out string variantLabel)
     {
         variantLabel = "";
@@ -1718,8 +1615,6 @@ class MainForm : Form
         this.stateLine2.Text = "Last result: OK " + action + " " + DateTime.Now.ToString("HH:mm");
     }
 
-    // A failure is never silent: red line 2, the inline red bar with the first
-    // error line, and the log strip opened so the whole story is one click away.
     private void ShowFailure(string firstError, string action, string exitText)
     {
         this.failureVisible = true;
@@ -1741,7 +1636,6 @@ class MainForm : Form
         this.moreMenu.Show(this.moreBtn, new Point(0, this.moreBtn.Height));
     }
 
-    // Destructive verbs confirm in plain words: what comes back, what goes.
     private void OnRemoveTheme(object s, EventArgs e)
     {
         DialogResult r = MessageBox.Show(
@@ -1783,8 +1677,6 @@ class MainForm : Form
         this.sawFailureSignal = false;
         this.firstErrorLine = null;
         SetBusy(true);
-        // Running an action opens the log, same as before; the difference is
-        // that a failure also must, even if the strip was closed.
         this.detailsOpen = true;
         ApplyLayout();
         AppendLine("== " + action + " variant=" + variantId + " ==");
@@ -1844,8 +1736,6 @@ class MainForm : Form
         {
             return;
         }
-        // A script that printed FAIL or FAILED has failed even if it still
-        // exited 0 (Show-Status runs verify without propagating its code).
         string upper = e.Data.ToUpperInvariant();
         if (upper.IndexOf("FAILED", StringComparison.Ordinal) >= 0 ||
             upper.IndexOf("FAIL", StringComparison.Ordinal) >= 0)
@@ -1877,8 +1767,6 @@ class MainForm : Form
         object[] arr = (object[])state;
         Process proc = (Process)arr[0];
         string action = (string)arr[1];
-        // The parameterless overload also waits for the redirected streams to
-        // reach EOF, so the failure token scan above is complete here.
         proc.WaitForExit();
         int code = proc.ExitCode;
         try { proc.Close(); }

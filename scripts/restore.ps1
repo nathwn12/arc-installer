@@ -1,26 +1,4 @@
-﻿# ArcIcons restore.ps1
-# Restores the pristine originals from originals\<name> into a SystemResources
-# directory. SAME mechanics as apply.ps1 (the one install command): directory
-# takeown + grant first with baseline restore in a `finally` (D:PAI AI-bit note
-# journaled, not hidden); per file resolve the surviving WinSxS sibling BEFORE
-# mutating, journal the intent, take ownership -> grant Administrators:F ->
-# unlink (delete the hardlink; the WinSxS payload survives) -> copy the pristine
-# original in -> restore the COMPLETE baseline security descriptor (owner +
-# group + DACL + protection flag, verified by full SDDL compare) on BOTH the
-# new file AND the surviving sibling -> assert live hash == originalSha256.
-# Privileges are enabled IN-PROCESS; holders come from Restart Manager
-# (-CloseHolders stops them); the icon cache is refreshed for EVERY logged-on
-# profile (iconcache*.db + thumbcache*.db, verified explorer restart in each
-# profile's own session) unless skipped.
-# A MISSING live target is CREATED from the verified pristine backup (never
-# refused): a delete-then-copy failure that leaves a missing target is
-# recovered here, not reported as unfixable. Any live hash (merged theme,
-# updated payload, anything) is restored without -Force.
-# Preflight (pristine hash, 3 unique allowlisted names, owner+SDDL present and
-# parseable) is UNCONDITIONAL. Mid-sequence failures roll back the files
-# already mutated to the pristine originals, record state.json mode=partial,
-# and fail loudly. Holds logs\ArcIcons.lock so repair cannot act mid-run.
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [switch]$DryRun,
   [switch]$Force,
@@ -31,8 +9,6 @@ param(
   [switch]$NoLock
 )
 $ErrorActionPreference = 'Stop'
-# This script lives at the tool root in the installed payload and under scripts\
-# in a checkout; bin\ is always at the tool root.
 $Tool = $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
 . (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
@@ -40,8 +16,6 @@ $DefaultRoot = Join-Path $env:ProgramData 'ArcIcons'
 
 function Fail-Restore([string]$Msg) {
   [Console]::Error.WriteLine($Msg)
-  # shell guarantee: NO exit path — preflight, lock, failure — may leave
-  # explorer.exe stopped.
   [void](Restore-ArcIconsShell 'restore.ps1 exit')
   exit 1
 }
@@ -268,7 +242,6 @@ try {
     })
     Write-Output ("  directory ACL restored: exact={0} aceMatch={1} {2}" -f $dr.Exact, $dr.AceMatch, $dr.Note)
   }
-  # shell guarantee: runs on success, failure and interrupt alike
   [void](Restore-ArcIconsShell 'restore.ps1 finally')
   if ($lockHeld) { Release-ArcIconsLock $logDir }
 }

@@ -1,37 +1,9 @@
-﻿# ArcIcons verify.ps1
-# Read-only check: state.json + manifests vs the live SystemResources files.
-# Manifest completeness is enforced first: an empty or missing manifest is
-# always FAIL, never PASS; exactly three UNIQUE allowlisted basenames are
-# required. Every baseline row must carry originalSha256 (64 hex) and
-# originalPath; every installed-manifest row must carry mergedSha256 (64 hex)
-# and stagePath. A missing field is a NAMED FAIL, never an INFO note that a
-# low-confidence hash classification then passes over. The state.json mode must
-# be one of installed|original|partial|drifted; anything else is FAIL, and an
-# absent mode is FAIL when installed-manifest.json exists (a merge was
-# recorded, so mode=original cannot be assumed).
-# Per file: live sha256 == recorded hash for the current mode; baseline owner
-# + complete DACL semantics (protection flag + ACE set, via full SDDL compare
-# with a semantic breakdown on mismatch) on BOTH the live path AND every
-# surviving hardlink sibling; the file loads via
-# LoadLibraryEx(LOAD_LIBRARY_AS_DATAFILE).
-# Theme invariants (bin\Test-ResourceInvariants.ps1) run ONLY in
-# mode=installed, where a missing checker is FAIL. The theme input for those
-# checks is the BUILT variant's source, read from the installed manifest's
-# per-file themeFile (falling back to the baseline themeFile), never from
-# originals\manifest.json alone — that file always describes the ARC variant,
-# so a non-ARC build would false-FAIL. In mode=original the live
-# files are the pristine originals, so theme invariants are not-applicable
-# (comparing stock-vs-stock would false-FAIL). mode=partial/drifted always
-# FAIL with an explanatory reason (re-run / re-merge).
-# Prints ARC-ICONS-VERIFY: PASS (exit 0) or FAIL (exit 1) with per-check detail.
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
   [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources')
 )
 $ErrorActionPreference = 'Stop'
-# This script lives at the tool root in the installed payload and under scripts\
-# in a checkout; bin\ is always at the tool root.
 $Tool = $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
 . (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
@@ -74,9 +46,6 @@ catch { Write-Output ("ARC-ICONS-VERIFY: FAIL manifest completeness: {0}" -f $_)
 $baseline = @{}
 foreach ($b in $origMan.files) { $baseline[[string]$b.name] = $b }
 
-# A row without originalSha256 previously fell through to the INFO branch below
-# ("no single expected hash"), so a manifest that omitted the field could still
-# reach PASS. Missing is a named FAIL, never INFO.
 foreach ($b in $origMan.files) {
   $bn = [string]$b.name
   $oh = ([string]$b.originalSha256).Trim()
@@ -128,9 +97,6 @@ if ($mode -eq 'installed') {
       $instMan = Read-ArcIconsJsonFile $instManPath
       try { Assert-ArcIconsInstalledManifest $instMan }
       catch { $failures += ("installed-manifest completeness: {0}" -f $_) }
-      # Every installed row must name its own merged hash and stage file: a row
-      # that omits either cannot be verified, and skipping the comparison is a
-      # silent PASS. Each gap is its own named FAIL.
       foreach ($f in @($instMan.files)) {
         if (-not $f) { continue }
         $fn = [string]$f.name
@@ -196,8 +162,6 @@ foreach ($b in $origMan.files) {
     if ($liveHash -eq $want) { Write-Output ("  [hash] OK {0} == {1} ({2})" -f $liveHash, $want, $wantKind) }
     else { $failures += ("{0}: live hash {1} != recorded {2} ({3}, mode={4})." -f $name, $liveHash, $want, $wantKind, $mode); Write-Output ("  [hash] MISMATCH live={0} want={1}" -f $liveHash, $want) }
   } elseif (($mode -eq 'installed') -or ($mode -eq 'original')) {
-    # no expected hash in a mode that requires one: already a named FAIL above;
-    # never print INFO here, which used to read as a soft pass.
     Write-Output ("  [hash] FAIL no recorded expected hash for mode={0} (named FAIL above)." -f $mode)
   } else {
     $cls = 'unknown'
@@ -256,7 +220,6 @@ foreach ($b in $origMan.files) {
     else {
       $origP = $null
       $themeP = $null
-      # the built variant's theme source, not originals\manifest.json's ARC path
       $themeRel = [string]$b.themeFile
       if ($merged[$name] -and $merged[$name].PSObject.Properties['themeFile'] -and [string]$merged[$name].themeFile) {
         $themeRel = [string]$merged[$name].themeFile

@@ -38,15 +38,11 @@ param([switch]$Force)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# The theme tree, the download cache and the docs it copies live at the
-# repository root, one level above scripts\.
 $Root     = Split-Path -Parent $PSScriptRoot
 $ThemeDir = Join-Path $Root 'theme'
 $CacheDir = Join-Path $Root 'staging\theme-cache'
 $PacksUrl = 'https://raw.githubusercontent.com/niivu/resource-redirect-icon-themes/main/Resource%20Redirect%20themes'
 
-# Pinned upstream archives. Verified 2026-10-14 against the live upstream files;
-# ARC Symbolic.zip re-verified 2026-11-06 (same upstream commit family).
 $Packs = @(
   [pscustomobject]@{
     Name    = 'ARC.zip'
@@ -126,9 +122,6 @@ foreach ($f in @('zipfldr.dll', 'imagesp1.dll', 'imageres.dll')) {
 }
 Copy-Item -LiteralPath (Join-Path $ThemeDir 'Arc Neutral Grey\theme.ini') -Destination (Join-Path $ThemeDir 'Arc Dark Grey\theme.ini') -Force
 
-# Preview sheet: the neutral packs ship niivu's marketing PNG; a generated
-# variant gets one drawn from its own recolored payload (never a dyed copy of
-# the source sheet, which would darken the background and stay misleading).
 $previewGen = Join-Path $Root 'bin\New-IconThemePreview.ps1'
 $darkPreview = Join-Path $ThemeDir 'Arc Dark Grey\Extra\preview.png'
 Write-Host 'preview  Arc Dark Grey'
@@ -139,9 +132,6 @@ if ($LASTEXITCODE -ne 0) { throw "New-IconThemePreview.ps1 failed (exit $LASTEXI
 
 Copy-Item -LiteralPath (Join-Path $Root 'docs\arc-dark-grey-variant.md') -Destination (Join-Path $ThemeDir 'Arc Dark Grey\NOTES.md') -Force
 
-# theme\source.json records the fetch this tree came from so a later merge or
-# audit can re-check it. Overwritten on every fetch run (fetch-time fact, not
-# a versioned artifact).
 $shaMap = [ordered]@{}
 $urlList = @()
 foreach ($pack in $Packs) {

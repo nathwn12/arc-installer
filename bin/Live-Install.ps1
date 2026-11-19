@@ -1,22 +1,3 @@
-# SUPERSEDED: kept as the measured reference only.
-# The supported path is now the ONE command %ProgramData%\ArcIcons\apply.ps1
-# (install) / restore.ps1 (rollback), which subsume this script's mechanism
-# (directory ACL cycle, in-process privileges, sibling SD restore) plus holders,
-# journaling, rollback, locking and icon-cache refresh. See README.md. Do not
-# extend this file; do not run it alongside apply.ps1.
-# Live-Install.ps1 v4# Installs the merged ARC icon resources into C:\Windows\SystemResources\{imageres,imagesp1,zipfldr}.dll.mun
-#
-# Mechanism (measured, not assumed):
-#   * Administrators hold only read+execute on C:\Windows\SystemResources, so creating or
-#     deleting a NAME in that directory is denied; SeRestorePrivilege does NOT bypass it (measured).
-#   * Therefore: temporarily take ownership of the DIRECTORY + grant Administrators full control
-#     (the directory's baseline SDDL is captured beforehand and restored exactly afterwards),
-#     replace the three files, then restore the directory SDDL.
-#   * File contents are replaced by delete + copy; the WinSxS hardlink sibling is untouched.
-#   * Each new file gets owner NT SERVICE\TrustedInstaller + the file's baseline DACL via
-#     SetFileSecurityW, then is verified against the baseline SDDL.
-#   * A live file mapped by a running process cannot be deleted (share lock); with -CloseHolders
-#     the script stops the reported holder processes immediately before replacing that file.
 param(
     [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
     [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),
@@ -85,7 +66,6 @@ function Set-SddlDacl($p, $sddl) {
 }
 function Set-OwnerTi($p) { if ((Get-Acl -LiteralPath $p).Owner -ne $TI) { icacls "$p" /setowner "$TI" | Out-Null } }
 function Test-Locked($p) {
-    # a share lock (file mapped/open elsewhere) is an IOException; an ACL denial on read is NOT a lock
     try { $f = [System.IO.File]::Open($p, 'Open', 'Read', 'None'); $f.Close(); return $false }
     catch [System.IO.IOException] { return $true }
     catch { return $false }
@@ -97,9 +77,6 @@ function Get-Sibling($p) {
     return @($paths | Where-Object { $_ -ne $p })
 }
 function Make-FileDeletable($p) {
-    # DELETE on the file (or FILE_DELETE_CHILD on the dir) is required to unlink it; Administrators hold
-    # read+execute only, so take ownership and grant full control. This mutates the SHARED inode, so the
-    # surviving WinSxS sibling must be restored afterwards (Restore-SiblingSecurity).
     takeown /f "$p" | Out-Null
     icacls "$p" /grant '*S-1-5-32-544:F' | Out-Null
 }
@@ -145,7 +122,6 @@ $unknown = @($work | Where-Object { $_.State -eq 'UNKNOWN' })
 if ($unknown.Count -gt 0) { throw "live file(s) with unknown content: $(($unknown.Name) -join ', ')" }
 if ($Plan) { Write-Host 'PLAN ONLY - no changes made'; return }
 
-# ---------- directory ACL: take, then always restore ----------
 $dirTaken = $false
 function Take-DirAcl {
     takeown /f "$SystemResourceDir" | Out-Null

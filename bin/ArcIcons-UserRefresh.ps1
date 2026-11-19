@@ -1,43 +1,8 @@
-# ArcIcons-UserRefresh.ps1
-# Per-user icon-cache refresh for EVERY logged-on interactive profile, from an
-# elevated (or SYSTEM/session-0) context.
-#
-# Why this exists (measured 2026-11-06): the refresh used to read
-# %LOCALAPPDATA% of the CALLER and stop every explorer.exe on the machine. Run
-# elevated by an admin who is not the console user, or headless from the SYSTEM
-# auto-repair task, it cleared the wrong profile's cache, killed other users'
-# shells without restarting them, and the owning user still saw the old icons
-# until they cleared iconcache + thumbcache by hand.
-#
-# What it does now:
-#   - enumerates logged-on interactive sessions (WTSEnumerateSessions) and maps
-#     each session's account to its SID + profile path via
-#     HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList;
-#   - refreshes the caller's own profile IN PROCESS (caller is already that user
-#     and already in that session);
-#   - refreshes every OTHER profile by registering a one-shot scheduled task
-#     with an InteractiveToken principal for that user (no password, no TCB,
-#     works for LOCAL and domain accounts), starting it, waiting for its
-#     receipt, then deleting that task. The work therefore runs INSIDE the
-#     target session under the target user's token, where %LOCALAPPDATA% and
-#     "start explorer in my session" are correct by construction.
-#   - the worker (bin\Refresh-UserIconCache.ps1) stops ONLY its own session's
-#     explorer, deletes iconcache*.db AND thumbcache*.db (the old gap) plus the
-#     legacy IconCache.db, runs ie4uinit -show, restarts explorer, and proves an
-#     explorer pid is back in that same session before it writes ok=true.
-#
-# No side effects on dot-source. Windows PowerShell 5.1 compatible (the shipped
-# payload runs under powershell.exe). Never touches SystemResources.
-#
-# Every call that mutates a shell is reachable only for a LIVE SystemResources
-# directory (Invoke-ArcIconsPerUserIconCacheRefresh refuses a sandbox dir), so a
-# sandbox proof never restarts a real shell.
 
 if (-not (Get-Variable -Name ArcIconsUserRefreshHome -Scope Script -ErrorAction SilentlyContinue)) {
   $script:ArcIconsUserRefreshHome = $PSScriptRoot
 }
 
-# ---- WTS (logged-on sessions) -------------------------------------------------
 function Initialize-ArcIconsWtsApi {
   if (([System.Management.Automation.PSTypeName]'ArcIcons.WtsApi').Type) { return }
   Add-Type -Namespace ArcIcons -Name WtsApi -MemberDefinition @'
@@ -80,8 +45,6 @@ public static string QueryString(int sessionId, int infoClass) {
 '@
 }
 
-# Objects: SessionId, State (Active|Connected|Disconnected|Other), StateCode,
-# Domain, User, Account (DOMAIN\user or "").
 function Get-ArcIconsSessionTable {
   Initialize-ArcIconsWtsApi
   $rows = @()
@@ -110,13 +73,11 @@ function Get-ArcIconsSessionTable {
   return @($rows | Sort-Object SessionId)
 }
 
-# ---- Profile table (SID -> profile path + account) ---------------------------
 function Get-ArcIconsUserProfileTable {
   $base = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
   $rows = @()
   foreach ($k in @(Get-ChildItem -LiteralPath $base -ErrorAction SilentlyContinue)) {
     $sid = [string]$k.PSChildName
-    # user profiles only: local/domain (S-1-5-21-*) and Entra/AzureAD (S-1-12-1-*)
     if ($sid -notmatch '^S-1-(5-21|12-1)-') { continue }
     $path = ''
     try { $path = [string](Get-ItemProperty -LiteralPath $k.PSPath -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath } catch { continue }
@@ -141,7 +102,6 @@ function Get-ArcIconsProfileAccountBySid([string]$Sid) {
   try { return (New-Object System.Security.Principal.SecurityIdentifier($Sid)).Translate([System.Security.Principal.NTAccount]).Value } catch { return '' }
 }
 
-# ---- Explorer per session ----------------------------------------------------
 function Get-ArcIconsExplorerPids([int]$SessionId) {
   $pids = @()
   foreach ($p in @(Get-Process -Name explorer -ErrorAction SilentlyContinue)) {
@@ -179,12 +139,6 @@ function Start-ArcIconsSessionExplorer([int]$SessionId, [int]$TimeoutSec = 20) {
   return [pscustomobject]@{ Running = $true; Pids = $pids; Note = ("explorer running in session {0} pid(s)={1}" -f $SessionId, ($pids -join ',')) }
 }
 
-# ---- Profile enumeration -----------------------------------------------------
-# Every logged-on interactive profile, deduped by SID, plus the caller's own
-# profile when it is interactive. Fields:
-#   Sid, Account, ProfilePath, SessionId, SessionState, ExplorerPids, Resolved
-# Resolved=$false marks a logged-on session whose profile row could not be
-# matched (that profile can NOT be refreshed; callers must report it, not skip).
 function Get-ArcIconsLoggedOnProfiles {
   $table = @(Get-ArcIconsUserProfileTable)
   $sessions = @(Get-ArcIconsSessionTable)
@@ -222,8 +176,6 @@ function Get-ArcIconsLoggedOnProfiles {
     }
     $out += $entry
   }
-  # Caller's own profile: WTS can be unavailable in odd remoting contexts, but
-  # the caller is by definition a live interactive user when session != 0.
   try {
     $me = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $mySid = $me.User.Value
@@ -242,9 +194,6 @@ function Get-ArcIconsLoggedOnProfiles {
   return @($out | Sort-Object SessionId)
 }
 
-# ---- Cache drop (runs INSIDE the target profile/session) ---------------------
-# Stop that session's explorer first: iconcache/thumbcache files are held open
-# by the running shell, so a delete-first order silently fails (the old bug).
 function Invoke-ArcIconsProfileCacheDrop {
   param(
     [Parameter(Mandatory = $true)][string]$ProfilePath,
@@ -274,10 +223,6 @@ function Invoke-ArcIconsProfileCacheDrop {
   return [pscustomobject]@{ Deleted = @($deleted); Stopped = @($stopped); Shell = $shell }
 }
 
-# ---- One-shot interactive-token task (parent side) ---------------------------
-# Registers an InteractiveToken task for the target user (no password needed),
-# starts it, waits for the worker's receipt, then removes exactly that task.
-# The name is generated per run, so no existing task is ever overwritten.
 function Invoke-ArcIconsScheduledProfileRefresh {
   param(
     $Profile,
@@ -367,10 +312,6 @@ function Invoke-ArcIconsScheduledProfileRefresh {
   return $result
 }
 
-# ---- Parent entry ------------------------------------------------------------
-# Refreshes EVERY logged-on interactive profile. Returns a structured object
-# (Ok, Skipped, Note, Profiles, Failures); Invoke-ArcIconsIconCacheRefresh
-# wraps it as the one-line note the apply/restore journals have always stored.
 function Invoke-ArcIconsPerUserIconCacheRefresh {
   param(
     [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),

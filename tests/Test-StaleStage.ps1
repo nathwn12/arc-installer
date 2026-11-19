@@ -1,24 +1,3 @@
-# tests\Test-StaleStage.ps1 — t28: a stage merged from an older theme generation
-# must never be applied, and a variant switch must never clobber an unknown live
-# payload.
-#
-# (a) apply.ps1 on a root whose installed-manifest.json sourceOrigin theme hash
-#     disagrees with the theme on disk is REFUSED with a "stale stage" reason,
-#     names the rebuild path, and writes NOTHING (manifest, state, stage and
-#     live hashes unchanged; no apply journal is created).
-# (b) the SAME root after a real re-merge (bin\Merge-IconTheme.ps1 -Build) passes
-#     the same preflight (apply -DryRun plans, exit 0).
-# (c) ARC-Icons.ps1 -Action apply (a variant switch) on a root whose live
-#     payload matches neither the recorded original nor the recorded merge
-#     REFUSES before it mutates anything: the refusal names the file, its hash
-#     and the rebase path, and the manifest is unchanged (no merge ran).
-# (d) the switch chain asks ONCE, before any mutation: declining leaves the
-#     payload exactly as it was (no merge/restore, no stock-icons state).
-#
-# Every root is a TEMP copy made from %ProgramData%\ArcIcons. C:\Windows is
-# never read (beyond the copied manifests) and never written. Windows PowerShell
-# 5.1 only (executes ARC-Icons.ps1, so run from an elevated shell).
-# Run: powershell -NoProfile -File tests\Test-StaleStage.ps1 [-Keep]
 param([switch]$Keep)
 
 $ErrorActionPreference = 'Stop'
@@ -32,8 +11,6 @@ function Check([bool]$Condition, [string]$Message) {
 }
 function Get-Sha([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToUpperInvariant() }
 function Invoke-Proc([string]$Exe, [string[]]$ArgList) {
-    # child scripts write refusals to stderr; with EAP=Stop that would terminate
-    # this test, so capture it as data instead.
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -44,7 +21,6 @@ function Invoke-Proc([string]$Exe, [string[]]$ArgList) {
     return [pscustomobject]@{ Out = $out; Code = $code; Flat = ($out -replace '\s+', ' ') }
 }
 function Invoke-ProcWithInput([string]$Exe, [string[]]$ArgList, [string]$InputText) {
-    # confirmations read the console line; 'n' + Enter declines the single prompt
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -112,9 +88,6 @@ try {
     $liveAB = Join-Path $T 'liveAB'
     New-Live (Join-Path $rootAB 'stage') $liveAB
 
-    # simulate yesterday's failure: the manifest still records the OLD theme
-    # generation's hash while the theme on disk was regenerated (recorded value
-    # is what a 2026-10-14 merge signed; disk is the 2026-11-06 generation).
     $mfAB = Join-Path $rootAB 'installed-manifest.json'
     $manAB = Get-Content -Raw -LiteralPath $mfAB | ConvertFrom-Json
     $imageresTheme = Join-Path $rootAB 'theme\Arc Dark Grey\Windhawk Resources\imageres.dll'
@@ -138,7 +111,6 @@ try {
     Check ($beforeAB -eq $afterAB) 'A7 apply.ps1 wrote nothing (manifest, state, stage and live hashes unchanged)'
     Check (-not (Test-Path -LiteralPath (Join-Path $rootAB 'logs'))) 'A8 no apply journal directory was created'
 
-    # (b) the documented rebuild: a real re-merge of the same variant
     $r = Invoke-Proc $exe @('-NoProfile', '-File', $merge, '-Root', $rootAB, '-Build', '-Variant', 'dark-grey')
     Check ($r.Code -eq 0) 'B1 re-merge (Merge-IconTheme -Build) exits 0'
     $manB = Get-Content -Raw -LiteralPath $mfAB | ConvertFrom-Json
@@ -155,7 +127,6 @@ try {
     New-Root $src $rootC @('Windhawk Resources', 'Arc Dark Grey\Windhawk Resources') -NoStage
     $liveC = Join-Path $T 'liveC'
     New-Live (Join-Path $src 'stage') $liveC
-    # one live file that matches neither the recorded original nor the recorded merge
     $zC = Join-Path $liveC 'zipfldr.dll.mun'
     $bytes = [IO.File]::ReadAllBytes($zC)
     $grown = New-Object byte[] ($bytes.Length + 1)
@@ -190,10 +161,6 @@ try {
     foreach ($row in @($instD.files)) { if ([string]$row.name -eq 'zipfldr.dll.mun') { $mergedD = ([string]$row.mergedSha256).ToUpperInvariant() } }
     Check ((Get-Sha (Join-Path $liveD 'zipfldr.dll.mun')) -eq $mergedD) 'D4 live payload is still the recorded merge after declining (never left on stock icons)'
 
-    # D5: every confirmation happens BEFORE the first mutation. The defect was a
-    # second prompt after merge+restore: declining it stranded the machine on
-    # stock icons. Prove the last Confirm call in Invoke-Apply precedes the
-    # merge step (and D1-D4 prove a decline mutates nothing).
     $iconsText = Get-Content -Raw -LiteralPath $icons
     $applyBody = [regex]::Match($iconsText, '(?s)function Invoke-Apply \{.*?\r?\n\}').Value
     $lastConfirm = $applyBody.LastIndexOf('Confirm', [StringComparison]::Ordinal)

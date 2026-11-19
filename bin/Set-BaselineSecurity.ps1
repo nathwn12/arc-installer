@@ -1,23 +1,4 @@
-﻿# ArcIcons bin\Set-BaselineSecurity.ps1
-# Shared library: DOT-SOURCE ONLY (no side effects on load). Used by apply.ps1,
-# restore.ps1, repair.ps1 and verify.ps1. Owns:
-#  - privilege enabling (SeRestorePrivilege + SeTakeOwnershipPrivilege +
-#    SeBackupPrivilege via AdjustTokenPrivileges, so owner writes are
-#    deterministic, not luck-of-the-token);
-#  - complete baseline security restore (owner + group + DACL + protection flag
-#    in one SetSecurityDescriptorSddlForm, verified by full SDDL compare);
-#  - WinSxS sibling resolution via `fsutil hardlink list` (caller captures the
-#    sibling BEFORE mutating, because takeown touches the shared inode);
-#  - the atomic logs\ArcIcons.lock protocol (CreateNew + stale timeout);
-#  - the shell guarantee: per-user icon-cache refresh (every logged-on profile:
-#    iconcache*.db AND thumbcache*.db, ie4uinit -show, verified explorer
-#    restart in that profile's own session) plus Restore-ArcIconsShell for every
-#    exit path. The multi-user engine lives in bin\ArcIcons-UserRefresh.ps1 and
-#    is dot-sourced at the END of this file (it calls helpers defined here).
-#  - manifest allowlist validation, path canonicalization/confinement,
-#    hashing and journal appends.
-# Windows PowerShell 5.1 compatible (no ?. / ?? / ternary).
-
+﻿
 function Resolve-ArcIconsCanonicalPath([string]$Path) {
   return [IO.Path]::GetFullPath($Path)
 }
@@ -29,9 +10,6 @@ function Test-ArcIconsPathInside([string]$Path, [string]$Dir) {
   return $p.StartsWith($d + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
-# Manifest-supplied paths are DATA, never trusted destinations. Refuse any
-# resolved path under a system-owned resource tree: the rebase writes only
-# inside -Root, so a manifest row can never aim a copy at SystemResources/WinSxS.
 function Assert-ArcIconsNoSystemResourceWrite([string]$FullPath, [string]$Label) {
   $c = [IO.Path]::GetFullPath($FullPath)
   $guarded = @()
@@ -46,10 +24,6 @@ function Assert-ArcIconsNoSystemResourceWrite([string]$FullPath, [string]$Label)
   }
 }
 
-# Canonicalize a RELATIVE child of -Root and enforce confinement: reject
-# rooted/UNC values, reject anything that resolves outside -Root or onto -Root
-# itself, and reject system-resource destinations. Every rebase write target is
-# produced here, whether the value came from a manifest row or was derived.
 function Resolve-ArcIconsRootChildPath([string]$RootC, [string]$Relative, [string]$Label) {
   $rel = ([string]$Relative).Trim()
   if (-not $rel) { throw ("refused {0}: empty path; a manifest row must name a path under -Root." -f $Label) }
@@ -75,10 +49,6 @@ function Test-ArcIconsAllowedName([string]$Name) {
   return $allowed -contains $Name.ToUpperInvariant()
 }
 
-# Count + unique-name + bare-allowlisted-basename checks always run. When the
-# caller passes -RootC, every row's write paths are ALSO canonicalized and
-# confined to that root (originalPath must name the row's own file), so a
-# manifest cannot redirect a rebase copy outside -Root.
 function Assert-ArcIconsOriginalsManifest($Manifest, [string]$RootC = '') {
   $files = @()
   if ($Manifest.files) { $files = @($Manifest.files) }
@@ -127,10 +97,6 @@ function Assert-ArcIconsInstalledManifest($Manifest) {
   }
 }
 
-# Variant resolution for scripts that merge or capture (apply.ps1). Mirrors the
-# variant tables in bin\Merge-IconTheme.ps1 and ARC-Icons.ps1: same ids,
-# display labels and theme dirs, same alias normalization. Returns a
-# pscustomobject {Id, Display, ThemeDir} or $null for an unknown name.
 function Get-ArcIconsVariantInfo([string]$Name) {
   $key = ([string]$Name).Trim().ToLowerInvariant() -replace '[^a-z0-9]+', '-'
   $key = $key.Trim('-')
@@ -151,9 +117,6 @@ function Get-ArcIconsVariantInfo([string]$Name) {
   return [pscustomobject]@{ Id = 'dark-grey'; Display = 'Arc Dark Grey'; ThemeDir = 'Arc Dark Grey\Windhawk Resources' }
 }
 
-# Provably-fresh machine: no state.json AND no installed-manifest.json AND no
-# originals\ directory. Anything else with originals\manifest.json missing is
-# partial state and must refuse, never auto-capture.
 function Test-ArcIconsFreshInstall([string]$RootC) {
   if (Test-Path -LiteralPath (Join-Path $RootC 'state.json')) { return $false }
   if (Test-Path -LiteralPath (Join-Path $RootC 'installed-manifest.json')) { return $false }
@@ -161,20 +124,12 @@ function Test-ArcIconsFreshInstall([string]$RootC) {
   return $true
 }
 
-# First-install capture: copies the live {imageres,imagesp1,zipfldr}.dll.mun
-# from $SysC into originals\ with the SAME manifest schema + ACL baseline the
-# existing originals\manifest.json uses (per-file owner + full SDDL, .acl
-# sidecars, the directory SDDL). Call ONLY on a Test-ArcIconsFreshInstall
-# root; anything partial must refuse instead. Throws with a named reason.
 function Invoke-ArcIconsOriginalsCapture([string]$RootC, [string]$SysC, $VariantInfo) {
   $pairs = @(
     [pscustomobject]@{ Mun = 'imageres.dll.mun'; Dll = 'imageres.dll' },
     [pscustomobject]@{ Mun = 'imagesp1.dll.mun'; Dll = 'imagesp1.dll' },
     [pscustomobject]@{ Mun = 'zipfldr.dll.mun'; Dll = 'zipfldr.dll' }
   )
-  # themeOrigin provenance: arc + arc-symbolic + both neutrals ship from niivu's
-  # resource-redirect repo (archive name from the landed theme dir, same repo
-  # the live manifest records); dark-grey is generated on this PC.
   $origin = 'generated on this PC by bin\Recolor-IconTheme.ps1; see theme\Arc Dark Grey\NOTES.md'
   if ($VariantInfo.Id -eq 'arc') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/ARC.zip' }
   if ($VariantInfo.Id -eq 'arc-symbolic') { $origin = 'https://github.com/niivu/resource-redirect-icon-themes  Resource Redirect themes/ARC Symbolic.zip' }
@@ -237,37 +192,7 @@ function Invoke-ArcIconsOriginalsCapture([string]$RootC, [string]$SysC, $Variant
   Write-Output ("ARC-ICONS-CAPTURE: OK originals\manifest.json (3 files, theme '{0}')" -f $VariantInfo.Display)
 }
 
-# Single-file original rebase (measured 2026-10-30). A Windows component
-# update replaces a live .mun with a NEW WinSxS build: live is hardlinked to the
-# new component, owner is TrustedInstaller again, and the recorded original is
-# stale. apply.ps1 then refuses ("live hash is neither recorded original nor
-# recorded merged") and -Force would paper over a real baseline change. The
-# rebase adopts the CURRENT LIVE file as the pristine original for ONE name,
-# archiving the superseded original + its acl sidecar + the old row so the
-# previous baseline stays recoverable. Nothing outside $RootC is written.
-#
-# Gates (all refuse, never -Force-overridable):
-#   - $Name must be an allowlisted bare basename and have a row in the manifest;
-#   - every manifest write path must canonicalize INSIDE -Root (no rooted/UNC
-#     value, no .. escape, never SystemResources/WinSxS);
-#   - live must exist and hash EXACTLY to -ExpectLiveHash (caller-supplied);
-#   - live must NOT equal the recorded merged hash (that means our install is
-#     live, not an updated OS baseline: restore pristine first);
-#   - live == recorded original -> ALREADY-REBASED (no-op, verified consistent);
-#   - the live file must be hardlinked to a WinSxS component whose directory
-#     name parses as <arch>_<name>_<pubkey>_<version>_<culture>_<hash>
-#     (strict attribution; an unattributed or non-WinSxS sibling fails closed).
-# Caller must hold read access to live; no privilege is enabled here.
-#
-# ORDER: the validation below is read-only and is what -DryRun reports. The
-# commit path acquires logs\ArcIcons.lock FIRST and then runs this same
-# validation again under the lock, so the hashes/manifest/attribution that
-# justify the write are read while the lock is held - a concurrent
-# apply/restore cannot slide between the check and the commit.
 
-# Parse WinSxS component packaging from a hardlink sibling path:
-#   <arch>_<name>_<publicKeyToken>_<a.b.c.d>_<culture>_<hash>
-# Returns @{Name, Version} or $null (caller fails closed).
 function Get-ArcIconsWinSxSComponent([string]$Sibling) {
   $leaf = Split-Path -Leaf (Split-Path -Parent ([string]$Sibling))
   if (-not $leaf) { return $null }
@@ -275,9 +200,6 @@ function Get-ArcIconsWinSxSComponent([string]$Sibling) {
   return [pscustomobject]@{ Name = $leaf; Version = $Matches[1] }
 }
 
-# One read-only validation pass: every gate plus every value the commit needs.
-# Called by the dry-run path (no lock, no writes) and again by the commit path
-# AFTER the lock is held.
 function Get-ArcIconsRebasePlan {
   param(
     [string]$RootC,
@@ -409,8 +331,6 @@ function Get-ArcIconsRebasePlan {
   }
 }
 
-# Shape the public result object. Status is 'already-rebased' (no-op),
-# 'planned' (dry run) or 'rebased' (committed).
 function New-ArcIconsRebaseResult($V, [string]$Status, [bool]$DryRun) {
   $orig = $V.OldSha
   if ($Status -eq 'rebased') { $orig = $V.LiveSha }
@@ -437,7 +357,6 @@ function Invoke-ArcIconsOriginalRebase {
   }
   $rootFull = ([IO.Path]::GetFullPath($RootC)).TrimEnd('\')
   if ($DryRun) {
-    # Read-only preview: no lock file, no writes.
     $v = Get-ArcIconsRebasePlan -RootC $rootFull -SysC $SysC -Name $Name -ExpectLiveHash $ExpectLiveHash -BaseVersion $BaseVersion
     if ($v.Status -eq 'already-rebased') { return (New-ArcIconsRebaseResult $v 'already-rebased' $true) }
     return (New-ArcIconsRebaseResult $v 'planned' $true)
@@ -445,9 +364,6 @@ function Invoke-ArcIconsOriginalRebase {
 
   $logDir = Join-Path $rootFull 'logs'
   if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-  # Lock BEFORE validating: the commit reads every hash, row and destination
-  # again under the lock, so a concurrent apply/restore/match cannot move the
-  # live file or rewrite the manifest between the check and the write.
   [void](Acquire-ArcIconsLock $logDir $LockTimeoutSec)
   try {
     $v = Get-ArcIconsRebasePlan -RootC $rootFull -SysC $SysC -Name $Name -ExpectLiveHash $ExpectLiveHash -BaseVersion $BaseVersion
@@ -572,14 +488,6 @@ function Get-ArcIconsFullSddl([string]$LiteralPath) {
   return (Get-Acl -LiteralPath $LiteralPath).GetSecurityDescriptorSddlForm($sections)
 }
 
-# Wholesale SD restore. .NET Set-Acl and SetNamedSecurityInfo both leave the
-# SE_DACL_AUTO_INHERITED (AI) flag behind, so a post-hoc set reads back D:PAI
-# instead of the baseline D:P (measured in sandbox isolation). NtSetSecurityObject
-# with a full self-relative SD parsed from the baseline SDDL replaces owner +
-# group + DACL + control flags wholesale and reads back byte-identical to the
-# baseline string (measured: exact=True). Caller must already hold WRITE_DAC /
-# WRITE_OWNER on the path — in our flow that is true because the caller either
-# just created the file (owner=self) or ran takeown on the shared inode first.
 function Ensure-ArcIconsNativeSD {
   if ([System.Management.Automation.PSTypeName]'ArcIconsNativeSD'.Type) { return }
     Add-Type -TypeDefinition @'
@@ -664,9 +572,6 @@ function Get-ArcIconsHardlinkTargets([string]$LiteralPath) {
   return @($out | Sort-Object -Unique)
 }
 
-# STRICT attribution: only a target inside a WinSxS component directory counts.
-# An ordinary hardlink (e.g. a user's own copy) is NOT evidence that the live
-# file came from an OS component, so it is never returned as a fallback.
 function Get-ArcIconsWinSxSSibling([string]$LiteralPath, [string[]]$Targets) {
   $canon = [IO.Path]::GetFullPath($LiteralPath)
   $others = @($Targets | Where-Object { $_ -ine $canon })
@@ -716,14 +621,8 @@ function Write-ArcIconsJournal([string]$LogsDir, [string]$FileName, $Entry) {
   ($Entry | ConvertTo-Json -Depth 5 -Compress) | Add-Content -Encoding utf8 -LiteralPath (Join-Path $LogsDir $FileName)
 }
 
-# ---- Measured live mechanism (see README): holders, directory ACL, icon cache ----
-# A live file mapped by a running process cannot be deleted (share lock, not ACL).
-# Holders are found with the Restart Manager API (measured: imageres.dll.mun is
-# typically held by explorer and a RuntimeBroker).
 
 function Get-ArcIconsHoldersInProcess([string[]]$Paths) {
-  # Raw Restart Manager query. Runs in a CHILD process (see Get-ArcIconsHolders):
-  # a native interop fault here must never take down the caller.
   if (-not ([System.Management.Automation.PSTypeName]'ArcIconsRM').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -757,9 +656,6 @@ public static class ArcIconsRM {
 }
 
 function Get-ArcIconsHolders([string[]]$Paths) {
-  # Child-process isolation: the Restart Manager interop runs in a fresh host
-  # with a timeout, so a native fault returns "holders unknown" instead of
-  # crashing apply/restore/repair. Returns int PIDs (possibly empty).
   $tmp = $null
   try {
     $lib = Join-Path $PSScriptRoot 'Set-BaselineSecurity.ps1'
@@ -791,7 +687,6 @@ function Get-ArcIconsHolders([string[]]$Paths) {
 }
 
 function Test-ArcIconsLocked([string]$LiteralPath) {
-  # A share lock (file mapped/open elsewhere) is an IOException; an ACL denial is NOT a lock.
   try { $f = [System.IO.File]::Open($LiteralPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None); $f.Close(); return $false }
   catch [System.IO.IOException] { return $true }
   catch { return $false }
@@ -807,13 +702,6 @@ function Get-ArcIconsHolderNames([int[]]$Pids) {
   return $names
 }
 
-# Directory ACL cycle (measured): Administrators hold only read+execute on
-# C:\Windows\SystemResources, so creating/deleting a NAME there is denied and
-# SeRestorePrivilege does NOT bypass it. The working sequence takes ownership of
-# the DIRECTORY + grants Administrators:F (baseline saved at
-# originals\acl\SystemResources.dir.sddl, D:PAI) and restores it in a finally.
-# For a non-live -SystemResourceDir (sandbox proof) the current SDDL is captured
-# as the baseline and restored the same way.
 function Resolve-ArcIconsDirBaselineSddl([string]$SysDir, [string]$RootC) {
   $liveDefault = Resolve-ArcIconsCanonicalPath (Join-Path $env:SystemRoot 'SystemResources')
   if ($SysDir -ieq $liveDefault) {
@@ -831,10 +719,6 @@ function Take-ArcIconsDirAcl([string]$SysDir) {
   if ($LASTEXITCODE -ne 0) { throw ("directory icacls grant failed for {0} (exit {1})." -f $SysDir, $LASTEXITCODE) }
 }
 
-# Restores the directory baseline WITHOUT throwing: the directory baseline is
-# D:PAI and the AI (auto-inherited) bit cannot be reproduced by the write, so an
-# access-neutral control-bit difference is reported (exact=$false + aceMatch) and
-# NOT hidden, instead of failing the run. Returns a psobject {After, Exact, AceMatch, Note}.
 function Restore-ArcIconsDirAcl([string]$SysDir, [string]$BaselineSddl) {
   Enable-ArcIconsPrivileges | Out-Null
   Ensure-ArcIconsNativeSD
@@ -859,15 +743,7 @@ function Restore-ArcIconsDirAcl([string]$SysDir, [string]$BaselineSddl) {
   return [pscustomobject]@{ After = $after; Exact = $exact; AceMatch = $aceMatch; Note = $note }
 }
 
-# ---- shell guarantee (owner requirement, 2026-10-14) ----
-# The icon-cache refresh stops explorer.exe, so every script that can reach it
-# must be able to put the shell back. MEASURED 2026-10-14: Winlogon's
-# AutoRestartShell=1 did NOT bring explorer back after the forced stop in the
-# 03:53 apply (explorer_count=0 until an out-of-band restart) — so the restart
-# is explicit, verified and retried, never assumed. The old note claimed
-# "explorer restarted" while only ever stopping it.
 function Test-ArcIconsInteractiveSession([int]$SessionId) {
-  # session 0 = services/SYSTEM: it cannot paint a user's desktop.
   return ($SessionId -ne 0)
 }
 
@@ -875,8 +751,6 @@ function Start-ArcIconsExplorer([int]$TimeoutSec = 20, [int]$SessionId = -1) {
   $exe = Join-Path $env:SystemRoot 'explorer.exe'
   $mySession = (Get-Process -Id $PID).SessionId
   if (($SessionId -ge 0) -and ($SessionId -ne $mySession)) {
-    # Start-Process cannot create a process in another session; the multi-user
-    # engine uses an interactive scheduled task for that. Say so, never fake it.
     return [pscustomobject]@{ Running = $false; Pids = @(); SessionIds = @(); Note = ("cannot start explorer in session {0} from session {1}" -f $SessionId, $mySession) }
   }
   for ($attempt = 1; $attempt -le 2; $attempt++) {
@@ -897,10 +771,6 @@ function Start-ArcIconsExplorer([int]$TimeoutSec = 20, [int]$SessionId = -1) {
   return [pscustomobject]@{ Running = $true; Pids = $ids; SessionIds = $sess; Note = ("explorer running pid(s)=" + ($ids -join ',') + " session(s)=" + ($sess -join ',')) }
 }
 
-# Safe on EVERY exit path — success, failure, refusal, interrupt: it acts only
-# when the CALLER'S OWN session has no explorer (a session-0 or other-session
-# caller must not claim it restored a shell it cannot reach), and reports what
-# it saw either way.
 function Restore-ArcIconsShell([string]$Where) {
   $mySession = (Get-Process -Id $PID).SessionId
   $mine = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $mySession })
@@ -909,39 +779,22 @@ function Restore-ArcIconsShell([string]$Where) {
     return ("shell guard [{0}]: explorer already running in own session pid(s)={1}" -f $Where, (@($mine | ForEach-Object { $_.Id }) -join ','))
   }
   if (-not (Test-ArcIconsInteractiveSession $mySession)) {
-    # A session-0 start would create a session-0 explorer while the user's
-    # desktop stays down — worse than useless. Say so instead of faking a pass.
     $msg = ("shell guard [{0}]: explorer.exe is not running in session 0; a session-0 start cannot restore an interactive desktop — the multi-user refresh restarts each user's shell from their own session." -f $Where)
     [Console]::Error.WriteLine($msg)
     return $msg
   }
   $r = Start-ArcIconsExplorer 20 $mySession
   $msg = ("shell guard [{0}]: {1}{2}" -f $Where, $r.Note, $(if ($all.Count -gt 0) { " (explorer elsewhere: pid(s)=" + (@($all | Where-Object { $_.SessionId -ne $mySession } | ForEach-Object { $_.Id }) -join ',') + ")" } else { '' }))
-  # Write-Host, not Write-Output: the guard must stay visible on a caller that
-  # discards the return value ([void]) — the message IS the receipt.
   if (-not $r.Running) { [Console]::Error.WriteLine($msg) } else { Write-Host $msg }
   return $msg
 }
 
-# Icon-cache refresh entry point (kept for every existing caller).
-# MEASURED 2026-11-06: the old body read the CALLER'S %LOCALAPPDATA% and stopped
-# every explorer.exe on the machine; elevated/headless runs therefore cleared the
-# wrong profile and left other users' shells down. Delegated now to the
-# multi-user engine (bin\ArcIcons-UserRefresh.ps1): every logged-on interactive
-# profile gets its own iconcache*.db + thumbcache*.db drop (thumbcache was the
-# documented gap) and its own verified explorer restart inside its own session.
-# Skipped automatically for a non-live -SystemResourceDir (sandbox proof must
-# never touch a real shell) and with -SkipIconCacheRefresh.
 function Invoke-ArcIconsIconCacheRefresh([string]$SysDir, [bool]$Skip, [string]$Root = '') {
   if (-not (Get-Command Invoke-ArcIconsPerUserIconCacheRefresh -ErrorAction SilentlyContinue)) {
-    # fail closed, never fall back to the single-profile body that caused the bug
     return 'FAILED: bin\ArcIcons-UserRefresh.ps1 is missing (multi-user refresh unavailable); no shell was touched'
   }
   $r = Invoke-ArcIconsPerUserIconCacheRefresh -Root $Root -SysDir $SysDir -Skip $Skip
   return [string]$r.Note
 }
 
-# The multi-user engine (session enumeration, per-profile worker, one-shot
-# interactive-token task transport). Dot-sourced LAST so it can see the helpers
-# above; it defines functions only, so loading stays side-effect free.
 . (Join-Path $PSScriptRoot 'ArcIcons-UserRefresh.ps1')

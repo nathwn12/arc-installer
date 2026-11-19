@@ -1,17 +1,3 @@
-# Test-UserRefreshTransport.ps1
-# Proves the cross-session transport the installer uses to refresh ANOTHER
-# user's icon cache from an elevated context: a one-shot scheduled task with an
-# InteractiveToken principal, started for the target session's user, running
-# bin\Refresh-UserIconCache.ps1 in -DryRun mode.
-#
-# Why -DryRun: the full worker stops and restarts that user's explorer. This test
-# proves the transport and the profile/token resolution WITHOUT touching a shell
-# (the explorer pid set must be unchanged afterwards). The real cache drop runs
-# only on a live install/uninstall, which this repo never performs as a test.
-#
-# Requires: elevated (registers a task) and at least one logged-on interactive
-# profile. Exit 0 = PASS, 1 = FAIL. Windows PowerShell 5.1 compatible.
-# Run: powershell -NoProfile -File tests\Test-UserRefreshTransport.ps1
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $Root 'bin\ArcIcons-UserRefresh.ps1')

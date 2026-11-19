@@ -1,61 +1,4 @@
-﻿# ArcIcons apply.ps1
-# THE one install command (no separate finalizer step): installs the merged icon
-# theme into a SystemResources directory.
-# Measured mechanism per file: resolve the surviving WinSxS sibling with
-# `fsutil hardlink list` BEFORE mutating (takeown touches the shared inode),
-# journal the intent to logs\apply.journal.jsonl, then take ownership ->
-# grant Administrators:F -> unlink (delete the hardlink; the WinSxS payload
-# survives) -> copy the staged file in -> restore the COMPLETE baseline
-# security descriptor (owner + group + DACL + protection flag, verified by full
-# SDDL compare) on BOTH the new file AND the surviving sibling -> assert live
-# hash == mergedSha256. Owner/group writes use privileges enabled IN-PROCESS
-# (SeRestorePrivilege/SeBackupPrivilege/SeTakeOwnershipPrivilege via
-# AdjustTokenPrivileges; a child process like `icacls /setowner` fails without
-# that). NEVER writes through the hardlink.
-# Directory ACL (measured): Administrators hold only read+execute on the live
-# SystemResources directory and SeRestorePrivilege does NOT bypass it for
-# creating a name, so the directory is takeown'd + granted Administrators:F
-# before the first file and its baseline SDDL
-# (originals\acl\SystemResources.dir.sddl) is restored in a `finally` (the
-# D:PAI baseline's AI bit cannot be reproduced by the write — that one
-# access-neutral control-bit difference is journaled, not hidden).
-# Holders: a live file mapped by a running process cannot be deleted (share
-# lock, not ACL); holders come from the Restart Manager API and are named in
-# the failure; -CloseHolders stops them immediately before replacing that file.
-# Icon cache: ie4uinit -show alone is NOT enough — for EVERY logged-on profile,
-# iconcache*.db AND thumbcache*.db are deleted and that profile's explorer is
-# restarted inside its own session (see bin\ArcIcons-UserRefresh.ps1; skipped
-# for sandbox runs / -SkipIconCacheRefresh).
-# Shell guarantee: every exit path runs Restore-ArcIconsShell, so explorer.exe is
-# never left stopped (verified restart, pid reported — see Set-BaselineSecurity).
-# Stale-stage guard: installed-manifest.json records the theme file sha256 the
-# stage was merged from (sourceOrigin.files[]). Preflight re-hashes every theme
-# file on disk for the manifest's variant and REFUSES when any recorded hash
-# differs, a recorded row is missing, or there is no sourceOrigin at all (an
-# older manifest): a stage built from a different theme generation than the one
-# on disk is a STALE STAGE, and stage+manifest agreeing with each other proves
-# nothing. -Force cannot bypass it. apply.ps1 never re-merges (it stays a
-# single-purpose command): the rebuild path is ARC-Icons.ps1 -Action install
-# -Variant <id> -Yes (merge -> restore pristine -> apply -> verify).
-# Preflight (pristine/stage hashes, 3 unique allowlisted names, owner+SDDL
-# present and parseable, sibling captured before mutation) is UNCONDITIONAL:
-# -Force can never bypass it. -Force only overrides an unexpected LIVE hash (or
-# a missing live file, which is then created). Any mid-sequence failure rolls
-# back the files already mutated to the pristine originals, records state.json
-# mode=partial, and fails loudly.
-# Serialized with restore.ps1 / repair.ps1 via logs\ArcIcons.lock.
-# Supersedes bin\Live-Install.ps1 + bin\Finalize-Security.ps1 (kept as measured
-# reference only).
-# First install: on a provably-fresh machine (no state.json AND no
-# installed-manifest.json AND no originals\) the single apply captures the
-# pristine originals from -SystemResourceDir, merges -Variant (default arc),
-# applies and verifies - no separate capture step, no restore step (nothing is
-# installed yet). Partial state (any of the three present while
-# originals\manifest.json is missing) refuses with the preflight reason below;
-# -Force can never bypass that. -DryRun on a fresh machine refuses: a first
-# install must write (capture + merge), so there is no preview.
-# -Yes is accepted for controller/proof compatibility; apply never prompts.
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [switch]$DryRun,
   [switch]$Force,
@@ -68,8 +11,6 @@ param(
   [switch]$NoLock
 )
 $ErrorActionPreference = 'Stop'
-# This script lives at the tool root in the installed payload and under scripts\
-# in a checkout; bin\ is always at the tool root.
 $Tool = $PSScriptRoot
 if (-not (Test-Path -LiteralPath (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1') -PathType Leaf)) { $Tool = Split-Path -Parent $Tool }
 . (Join-Path $Tool 'bin\Set-BaselineSecurity.ps1')
@@ -77,20 +18,10 @@ $DefaultRoot = Join-Path $env:ProgramData 'ArcIcons'
 
 function Fail-Apply([string]$Msg) {
   [Console]::Error.WriteLine($Msg)
-  # shell guarantee: NO exit path — preflight, refusal, lock, failure — may
-  # leave explorer.exe stopped.
   [void](Restore-ArcIconsShell 'apply.ps1 exit')
   exit 1
 }
 
-# Stale-stage check: installed-manifest.json's sourceOrigin.files[] holds the
-# sha256 of every theme file the stage was merged from. Re-hash the theme on
-# disk for the manifest's variant and report any disagreement. Returns
-# { Stale, VariantId, VariantDisplay, SourceDir, Reason, Detail }. Treats a
-# manifest with no usable sourceOrigin as stale on purpose: an unprovable stage
-# is not trusted. Never throws: every failure becomes a stale reason.
-# Kept byte-for-byte in step with the copy in ARC-Icons.ps1 (same function name,
-# never loaded in the same process - apply.ps1 runs as a child process).
 function Get-ArcIconsStageStaleness($InstalledManifest, [string]$RootC) {
   $res = [pscustomobject]@{
     Stale = $true; VariantId = ''; VariantDisplay = ''; SourceDir = ''; Reason = ''; Detail = @()
@@ -203,9 +134,6 @@ try {
   if (-not (Test-Path -LiteralPath $instManPath -PathType Leaf)) { throw ('stale stage: installed-manifest.json is missing, so the stage cannot be proven against the theme on disk. Rebuild it: run ARC-Icons.ps1 -Action install -Variant <id> -Yes (re-merge -> restore pristine originals -> apply -> verify).') }
   $instMan = Read-ArcIconsJsonFile $instManPath
   Assert-ArcIconsInstalledManifest $instMan
-  # stale stage: the stage is only trustworthy if the theme it was merged from
-  # is still the theme on disk. Checked BEFORE the baseline/stage hash loops so
-  # a regenerated theme is named as such, never masked by a later error.
   $staleCheck = Get-ArcIconsStageStaleness $instMan $RootC
   if ($staleCheck.Stale) {
     throw ('stale stage: ' + $staleCheck.Reason)
@@ -357,11 +285,6 @@ try {
     dryRun = $false; forced = [bool]$Force; result = 'ok'
     files = @($results | ForEach-Object { [ordered]@{ name = $_.name; before = $_.before; after = $_.after; owner = $_.owner } })
   })
-  # post-state refresh: never let a shell hiccup throw into the rollback catch
-  # (the payload is already installed and state.json already says installed).
-  # Its result is turned into a non-zero exit AFTER the finally block below: a
-  # refresh that leaves a profile without its explorer is a failed action, not
-  # a note that still prints OK.
   try {
     $cache = Invoke-ArcIconsPerUserIconCacheRefresh -Root $RootC -SysDir $SysC -Skip ([bool]$SkipIconCacheRefresh)
     $cacheNote = [string]$cache.Note
@@ -451,15 +374,10 @@ try {
     })
     Write-Output ("  directory ACL restored: exact={0} aceMatch={1} {2}" -f $dr.Exact, $dr.AceMatch, $dr.Note)
   }
-  # shell guarantee: runs on success, failure, refusal and interrupt alike
   [void](Restore-ArcIconsShell 'apply.ps1 finally')
   if ($lockHeld) { Release-ArcIconsLock $logDir }
 }
 
-# Fresh-machine tail: the chain above already merged + applied + recorded
-# state.json; verify the installed payload now (read-only). Runs only when the
-# apply itself succeeded - any failure above exited inside Fail-Apply, never
-# here - so a verify FAIL reports without rolling back the installed files.
 if ($wasFreshInstall) {
   Write-Output 'ARC-ICONS-APPLY: fresh-machine verify'
   $verifyPs = Join-Path $Tool 'verify.ps1'
@@ -473,10 +391,6 @@ if ($wasFreshInstall) {
   }
 }
 
-# A refresh that leaves any logged-on profile without a verified explorer is a
-# failed action: the payload is installed, but the shell did not come back.
-# Checked after the finally (directory ACL restored, lock released), never
-# inside the rollback catch: the payload is NOT rolled back for a shell failure.
 if ($cacheFailures.Count -gt 0) {
   Fail-Apply ("ARC-ICONS-APPLY: FAIL - the payload IS installed (state.json mode=installed), but the icon cache was NOT refreshed for every logged-on profile: {0}`n  sign out/in, or run ARC-Icons.ps1 -Action refresh -Yes, then re-verify." -f ($cacheFailures -join '; '))
 }

@@ -1,7 +1,4 @@
-﻿# ArcIcons remove-autorepair.ps1
-# Cleanly unregisters the ArcIcons-Repair scheduled task (if present) and
-# confirms it is gone.
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$TaskName = 'ArcIcons-Repair'
 )

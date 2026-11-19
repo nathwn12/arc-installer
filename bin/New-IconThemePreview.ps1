@@ -1,14 +1,3 @@
-# New-IconThemePreview.ps1 - render a preview sheet from a theme payload.
-#
-# The neutral variants ship niivu's marketing preview; a derived variant has no
-# upstream sheet, so this draws one from the payload it will actually install:
-# the first resolvable RT_GROUP_ICON ids at 48 px on a dark card, each labelled
-# with its group id. Read-only on the payload; writes exactly -Dest.
-#
-# Params: -Source <dir holding imageres.dll / imagesp1.dll / zipfldr.dll>
-#         -Dest   <png to write; must not be inside C:\Windows>
-#         -Title  <sheet title, e.g. 'Arc Dark Grey'>
-#         -Note   <one-line derivation note>
 param(
     [Parameter(Mandatory = $true)][string]$Source,
     [Parameter(Mandatory = $true)][string]$Dest,
@@ -85,7 +74,6 @@ public static class ArcPreviewIcons {
 '@
 }
 
-# group ids are numeric resources; sorted for a deterministic sheet.
 $dll = Join-Path $Source 'imageres.dll'
 if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) { throw "missing $dll" }
 $iconIds = @()

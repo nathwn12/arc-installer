@@ -1,14 +1,3 @@
-# Rebase-ArcIconsOriginal.ps1 — adopt the CURRENT LIVE <name> as the new pristine
-# original for ONE resource file after a Windows component update, so apply.ps1
-# stops refusing ("live hash is neither recorded original nor recorded merged")
-# without -Force. Thin CLI over Invoke-ArcIconsOriginalRebase (kept in
-# bin\Set-BaselineSecurity.ps1 next to the capture routine it supersedes).
-#
-# DRY-RUN BY DEFAULT: -DryRun is on unless -Commit is given, so a bare run only
-# prints the plan and exits 0. Writing needs -Commit (there is no -Force: the
-# gates in Invoke-ArcIconsOriginalRebase are not overridable). It never writes
-# outside -Root and never writes to live.
-# Params: -Root | -SystemResourceDir | -Name | -ExpectLiveHash | -BaseVersion | -DryRun | -Commit | -LockTimeoutSec
 param(
     [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
     [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),

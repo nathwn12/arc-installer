@@ -77,17 +77,12 @@ function Get-TextSha256([string]$Text) {
     finally { $sha.Dispose() }
 }
 
-# One launch, one temp tool root, one captured result. The env var is the test
-# seam inside ArcInstaller.cs; the payload is still verified either way.
 function Invoke-Installer {
     param(
         [string]$ExePath,
         [string[]]$Arguments,
         [string]$ToolRoot
     )
-    # Start-Process -PassThru reports an empty ExitCode for a winexe in
-    # Windows PowerShell 5.1 unless -Wait is used, and -Wait cannot time out.
-    # A raw Process gives both the real exit code and a watchdog.
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = $ExePath
     $psi.Arguments = ($Arguments -join ' ')
@@ -115,8 +110,6 @@ function Get-TreeFileCount([string]$Root) {
     @(Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue).Count
 }
 
-# Compile a fixture exe from the shipped source and a chosen payload. The csc
-# line is build.ps1's, minus the icon; only the embedded zip differs.
 function New-FixtureExe {
     param(
         [string]$Name,
@@ -134,7 +127,6 @@ function New-FixtureExe {
         }
         [IO.File]::WriteAllText($dest, [string]$Files[$key], (New-Object Text.UTF8Encoding($false)))
     }
-    # build.ps1 writes path before sha256; new-fixture rows keep that order too.
     $manifest = [pscustomobject]@{ generated = (Get-Date).ToString('o'); files = @($Rows) }
     $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $filesDir 'payload-manifest.json') -Encoding utf8
     $zip = Join-Path $dir 'payload.zip'
@@ -143,9 +135,6 @@ function New-FixtureExe {
     New-ExeFromZip -Name $Name -ZipPath $zip
 }
 
-# A zip whose single entry declares 705 MiB decompressed: over the 704 MiB
-# (738,197,504-byte) cap, ~718 KB on disk, ~0.3 s to write. No manifest entry
-# is needed because the cap is checked before the manifest is read.
 function New-BombExe {
     param([string]$Name)
     $dir = Join-Path $work $Name
@@ -174,8 +163,6 @@ function New-BombExe {
     New-ExeFromZip -Name $Name -ZipPath $zip
 }
 
-# Compile a fixture exe around an already-built payload.zip (for zips whose
-# entry names ZipFile.CreateFromDirectory cannot produce, such as '../escape').
 function New-ExeFromZip {
     param([string]$Name, [string]$ZipPath)
     $fixtureExe = Join-Path (Split-Path -Parent $ZipPath) ($Name + '.exe')
@@ -208,7 +195,6 @@ try {
     $onDisk = Get-TreeFileCount $healthyRoot
     Assert-True ($onDisk -eq ($rows.Count + 1)) "extracted file count $onDisk == manifest rows $($rows.Count) + payload-manifest.json"
 
-    # Incremental behaviour: an unchanged tree is a no-op, a changed file is restored.
     $r = Invoke-Installer -ExePath $exe -Arguments @('--extract') -ToolRoot $healthyRoot
     Assert-True ($r.ExitCode -eq 0) "second healthy --extract exit 0 (got $($r.ExitCode))"
     $victim = Join-Path $healthyRoot 'ARC-Icons.ps1'
@@ -223,8 +209,6 @@ try {
     $probeText = 'probe payload bytes'
     $probeHash = Get-TextSha256 $probeText
 
-    # Control: the same fixture with a truthful row must extract, so a failure
-    # below is the guard and not the fixture harness.
     $goodExe = New-FixtureExe -Name 'good' -Files @{ 'probe.txt' = $probeText } `
         -Rows @([pscustomobject]@{ path = 'probe.txt'; sha256 = $probeHash })
     $goodRoot = Join-Path $work 'roots\good'
@@ -232,7 +216,6 @@ try {
     Assert-True ($r.ExitCode -eq 0) "truthful fixture control exit 0 (got $($r.ExitCode), stderr: $($r.StdErr))"
     Assert-True ((Get-Sha256Hex (Join-Path $goodRoot 'probe.txt')) -eq $probeHash) 'truthful fixture wrote the expected probe.txt'
 
-    # (b1) manifest row digest does not match the archive bytes.
     $badHashExe = New-FixtureExe -Name 'badhash' -Files @{ 'probe.txt' = $probeText } `
         -Rows @([pscustomobject]@{ path = 'probe.txt'; sha256 = ('0' * 64) })
     $badHashRoot = Join-Path $work 'roots\badhash'
@@ -245,7 +228,6 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $badHashRoot)) 'hash mismatch creates no tool root'
     Assert-True ((Get-TreeFileCount $badHashRoot) -eq 0) 'hash mismatch writes no file'
 
-    # (b2) a manifest row with no archive entry.
     $ghostExe = New-FixtureExe -Name 'ghost' -Files @{ 'probe.txt' = $probeText } `
         -Rows @(
             [pscustomobject]@{ path = 'probe.txt'; sha256 = $probeHash },
@@ -258,7 +240,6 @@ try {
     Assert-Match $r.StdErr 'has no entry in the embedded payload' 'missing archive entry names the reason'
     Assert-True ((Get-TreeFileCount $ghostRoot) -eq 0) 'missing archive entry writes no file'
 
-    # (b3) an archive entry with no manifest row (extra unverified bytes).
     $extraExe = New-FixtureExe -Name 'extra' -Files @{ 'probe.txt' = $probeText; 'extra.txt' = 'smuggled' } `
         -Rows @([pscustomobject]@{ path = 'probe.txt'; sha256 = $probeHash })
     $extraRoot = Join-Path $work 'roots\extra'
@@ -268,19 +249,15 @@ try {
     Assert-Match $r.StdErr 'has no .* row' 'unlisted archive entry names the reason'
     Assert-True ((Get-TreeFileCount $extraRoot) -eq 0) 'unlisted archive entry writes no file'
 
-    # The normal launch (no arguments) runs the same gate and stops before the UI.
     $r = Invoke-Installer -ExePath $badHashExe -Arguments @() -ToolRoot $badHashRoot
     Assert-True ($r.ExitCode -eq 2) "GUI launch with a tampered payload exits 2 (got $($r.ExitCode))"
     Assert-True ((Get-TreeFileCount $badHashRoot) -eq 0) 'GUI launch with a tampered payload writes no file'
 
-    # --cli runs the same gate before the installed controller can start.
     $r = Invoke-Installer -ExePath $badHashExe -Arguments @('--cli', '-Action', 'status') -ToolRoot $badHashRoot
     Assert-True ($r.ExitCode -eq 2) "--cli with a tampered payload exits 2 (got $($r.ExitCode))"
     Assert-True ((Get-TreeFileCount $badHashRoot) -eq 0) '--cli with a tampered payload writes no file'
     Write-Output 'OK tampered: hash mismatch, missing entry and unlisted entry each exit 2 with no write (GUI and --cli)'
 
-    # (b4) an entry that escapes the install root (ZipFile cannot make one, so
-    # the zip is built entry by entry).
     $travDir = Join-Path $work 'traversal'
     New-Item -ItemType Directory -Force -Path $travDir | Out-Null
     $travZip = Join-Path $travDir 'payload.zip'

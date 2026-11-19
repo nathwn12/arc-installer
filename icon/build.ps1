@@ -1,5 +1,3 @@
-# ArcInstaller icon build - reproducible, no third-party assets.
-# Compiles src\IconForge.cs with the in-box .NET Framework csc (C# 5) and emits every artifact.
 [CmdletBinding()]
 param([string]$Variant = 'A')
 

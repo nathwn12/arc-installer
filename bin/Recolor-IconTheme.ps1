@@ -1,61 +1,3 @@
-# Recolor-IconTheme.ps1 - derive a darker Windhawk resource payload from an
-# existing one, WITHOUT touching the source payload.
-#
-# Mechanism: read every RT_ICON (#3) bitmap of -Source, multiply each bitmap's
-# R, G and B channel by an effective factor (alpha and every other byte
-# untouched), then write the recolored bitmaps into a copy of the file at -Dest
-# with the Win32 resource-update API (BeginUpdateResource / UpdateResource /
-# EndUpdateResource, the same proven write path as bin\Merge-IconTheme.ps1).
-#
-# Bitmap kinds handled (all of them; an unhandled kind FAILS the run instead of
-# being skipped silently):
-#   32bpp BI_RGB DIB   - every pixel's B,G,R multiplied
-#   24bpp BI_RGB DIB   - every pixel's B,G,R multiplied
-#   1/4/8bpp BI_RGB    - the color table (palette) is multiplied; the palette
-#                        indices, the AND mask and every other byte are untouched
-#   PNG                - decoded, RGB multiplied, alpha preserved, re-encoded
-#                        (System.Drawing / GDI+)
-# A PNG re-encode changes the entry's byte length, so any RT_GROUP_ICON (#14)
-# entry whose directory declares the OLD length is updated to the new one in the
-# same write session. The theme sources hold the invariant "declared size ==
-# RT_ICON length" exactly (measured on all three Neutral Grey payloads), and the
-# destination is re-checked against it after the write.
-#
-# Luminance floor, one factor per GROUP: a straight multiply sends an
-# already-dark icon toward black (measured: the Hard drive family sits at mean
-# luminance 78-91, and k = 0.55 alone drove it to ~43-50). Every RT_GROUP_ICON
-# (#14) gets ONE effective factor for ALL of its RT_ICON sizes:
-#   kEff = min(1, max(K, Floor / groupMeanLuminance))
-# so a glyph cannot come out dark at 16 px and light at 256 px (a dyed size).
-# The factor is a single scalar, so every channel of every member is scaled by
-# the same number: hue and saturation ratios are preserved EXACTLY - this tool
-# never desaturates. A per-PIXEL floor was rejected on purpose: clamping each
-# channel separately lands all three channels on the same value, which IS
-# desaturation. groupMeanLuminance is the visible-pixel-weighted mean over the
-# group's members; an RT_ICON in no group falls back to its own mean.
-# Mean luminance is measured over VISIBLE pixels only (alpha >= 128 for 32bpp /
-# PNG; the AND mask decides for 24bpp and palette bitmaps), so a transparent
-# background cannot drag the mean down.
-#
-# Neutral-axis guard (checked on the recolored bytes, fails closed):
-#   * a neutral source entry (its mean channel spread <= 6, i.e. grey) must
-#     stay neutral: output spread <= 6. A residual tint means a dyed grey.
-#   * a chromatic source entry (spread > 6, e.g. the blue network glyph) may
-#     keep its hue, but the recolor must stay ON the neutral axis: every output
-#     channel mean equals sourceMean * kEff within 1, and the output spread
-#     equals srcSpread * kEff within 2. Any other deviation is a reject.
-#   * fully transparent entries (no visible pixel) are skipped byte-for-byte:
-#     there is nothing to darken, and a PNG re-encode would only churn bytes.
-# Indexed (1/4/8bpp) bitmaps recolor the palette only; indices, mask and every
-# other byte keep their exact source value.
-#
-# Params: -Source <payload DLL to read>   (never modified)
-#         -Dest   <payload DLL to write>  (created; must not equal -Source)
-#         -K      <0 < k <= 1>            (RGB multiply factor)
-#         -Floor  <0..255>                (per-icon mean-luminance floor; default 64)
-#         -DryRun (plan only: reads, recolors in memory, writes nothing)
-#
-# Never writes to C:\Windows, never writes to its own -Source.
 param(
     [Parameter(Mandatory = $true)][string]$Source,
     [Parameter(Mandatory = $true)][string]$Dest,
@@ -75,8 +17,6 @@ $DestFull = [IO.Path]::GetFullPath($Dest)
 if ($DestFull -like 'C:\Windows*') { throw "Refusing to write under C:\Windows (got '$DestFull')." }
 if ($DestFull -eq $Source) { throw "Refusing to recolor in place: -Dest must differ from -Source ($Source)." }
 
-# ---- Win32 interop: resource read (LoadLibraryEx + enumeration) and the
-# ---- resource-update write path, both as measured in bin\Merge-IconTheme.ps1.
 if (-not ([System.Management.Automation.PSTypeName]'ArcRecolor').Type) {
     Add-Type -TypeDefinition @'
 using System;
@@ -428,9 +368,6 @@ function New-ResPtr([string]$Form, [bool]$IsInt) {
 function Free-ResPtr($r) { if ($r.Free) { [Runtime.InteropServices.Marshal]::FreeHGlobal($r.Ptr) } }
 
 function Get-BitmapPlan([byte[]]$b) {
-    # Geometry of one RT_ICON bitmap. 32bpp keeps the original PoC reading: the
-    # XOR bitmap is width*4 per row, an icon DIB carries a doubled biHeight and a
-    # 1bpp AND mask after the XOR rows. Returns Ok=$false plus a named Reason.
     $r = @{
         Ok = $false; Kind = ''; Reason = ''; Width = 0; Height = 0; Bpp = 0; Stride = 0
         PixelOffset = 0; PixelBytes = 0; PaletteOffset = 0; PaletteCount = 0
@@ -453,8 +390,6 @@ function Get-BitmapPlan([byte[]]$b) {
     $stride = [int]([Math]::Floor(($w * $bpp + 31) / 32) * 4)
     $maskStride = [int](([Math]::Floor(($w + 31) / 32)) * 4)
     $pixelsAt = $palOff + $palCount * 4
-    # Prefer the icon convention (doubled height + AND mask); fall back to the
-    # full biHeight only when the AND mask really is absent.
     foreach ($h in @([int]($hdrH / 2), $hdrH)) {
         if ($h -le 0) { continue }
         $iconFormat = ($hdrH -eq 2 * $h)
@@ -475,8 +410,6 @@ function Get-BitmapPlan([byte[]]$b) {
 }
 
 function Get-EffectiveFactor([double]$mean, [int]$visible) {
-    # min(1, max(K, Floor/mean)): one scalar per GROUP, so no member size can
-    # drift and hue is untouched. mean = 0 (no visible pixel) takes K.
     $eff = $K
     if ($visible -gt 0 -and $mean -gt 0) {
         $need = $Floor / $mean
@@ -498,8 +431,6 @@ function Get-BitmapStats([byte[]]$b, $plan) {
     return $st
 }
 function Get-BitmapRecolored([byte[]]$b, $plan, [double]$eff) {
-    # One group factor is passed in; this function only multiplies and reports
-    # the recolored mean RGB so the neutral-axis guard can check the real bytes.
     $out = New-Object byte[] $b.Length
     [Array]::Copy($b, $out, $b.Length)
     $changed = switch ($plan.Kind) {
@@ -517,8 +448,6 @@ function Get-BitmapRecolored([byte[]]$b, $plan, [double]$eff) {
 }
 
 function Open-PngBuffer([byte[]]$b) {
-    # Decode -> a 32bpp ARGB (or source 24bpp) bitmap plus one locked buffer's
-    # copy. Returns the pieces so stats and recolor share no state.
     $ms = New-Object IO.MemoryStream(, $b)
     $img = [System.Drawing.Bitmap]::FromStream($ms)
     $bmp = $img
@@ -538,8 +467,6 @@ function Close-PngBuffer($p) {
     $p.Img.Dispose(); $p.Ms.Dispose()
 }
 function Get-PngStats([byte[]]$b) {
-    # Decode only: mean RGB of the visible pixels. Recolored bytes are measured
-    # separately, so the guard never trusts the scalar arithmetic alone.
     $p = Open-PngBuffer $b
     try {
         $rect = New-Object System.Drawing.Rectangle(0, 0, $p.Bmp.Width, $p.Bmp.Height)
@@ -559,8 +486,6 @@ function Get-PngStats([byte[]]$b) {
     finally { Close-PngBuffer $p }
 }
 function Get-PngRecolored([byte[]]$b, [double]$eff) {
-    # Decode -> multiply RGB in place on the locked buffer -> re-encode. Alpha
-    # survives untouched; the recolored buffer is measured before encoding.
     $p = Open-PngBuffer $b
     try {
         $rect = New-Object System.Drawing.Rectangle(0, 0, $p.Bmp.Width, $p.Bmp.Height)
@@ -593,7 +518,6 @@ function Get-PngRecolored([byte[]]$b, [double]$eff) {
 
 Add-Type -AssemblyName System.Drawing
 
-# ---- plan ----
 $srcSize = (Get-Item -LiteralPath $Source).Length
 $srcSha = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash
 $entries = @([ArcRecolor]::ReadIcons($Source) | Sort-Object -Property NameInt)
@@ -630,7 +554,6 @@ foreach ($e in $entries) {
 }
 foreach ($s in $unsupported) { Write-Output ("UNSUPPORTED {0} {1} B - {2}" -f $s.Name, $s.Bytes, $s.Reason) }
 
-# ---- group pass: ONE kEff per RT_GROUP_ICON, shared by every member size ----
 $byNid = @{}
 foreach ($a in $analysis) {
     if (-not $byNid.ContainsKey($a.Entry.NameForm)) { $byNid[$a.Entry.NameForm] = $a }
@@ -680,8 +603,6 @@ foreach ($a in $analysis) {
         $gks = @($iconGroups[$ik])
         $a.GroupKey = $gks[0]
         $a.KEff = [double]$groupInfo[$a.GroupKey].KEff
-        # a member referenced by two groups with different factors is a data
-        # conflict, not something to paper over with an average.
         foreach ($other in $gks) {
             if ($other -ne $a.GroupKey -and [Math]::Abs([double]$groupInfo[$other].KEff - $a.KEff) -gt 0.0001) { $groupConflicts++ }
         }
@@ -691,7 +612,6 @@ foreach ($a in $analysis) {
     }
 }
 
-# ---- recolor + neutral-axis guard (measured on the bytes just produced) ----
 $planned = @()
 $violations = @()
 $skippedTransparent = 0
@@ -740,8 +660,6 @@ if ($violations.Count -gt 0) {
 }
 
 
-# ---- RT_GROUP_ICON: a PNG re-encode changes the entry length, and the group
-# ---- directory declares that length, so the declaring entry is rewritten too.
 $iconLen = @{}
 foreach ($p in $planned) { $iconLen["$($p.Entry.NameForm)|$($p.Entry.Lang)"] = $p.New.Length }
 $groupPlans = @()
@@ -770,8 +688,6 @@ foreach ($g in $groupEntries) {
 }
 
 $counts = @{}
-# NB: the loop variable must NOT be named $k - PowerShell names are
-# case-insensitive, so $k IS the [double]$K parameter.
 foreach ($kindName in @('dib32', 'dib24', 'indexed', 'png')) { $counts[$kindName] = @($planned | Where-Object Kind -eq $kindName).Count }
 $totalChanged = 0
 foreach ($p in $planned) { $totalChanged += $p.Changed }
@@ -789,12 +705,6 @@ if ($DryRun) {
 if ($unsupported.Count -gt 0) { throw "Nothing written: $($unsupported.Count) RT_ICON entries have no recolor path (see UNSUPPORTED above)." }
 if ($planned.Count -eq 0) { throw 'Nothing to recolor: no RT_ICON bitmap in the source payload.' }
 
-# ---- write: copy the source, then update the recolored RT_ICON entries plus
-# ---- any RT_GROUP_ICON entry whose declared size changed.
-# bin\Merge-IconTheme.ps1 measured one resource-update session capping out near
-# ~3200 ops / ~23MB (imageres failed mid-way there), and this write is ~1300 ops
-# over ~48MB, so ops are packed into chunks of <=1200 ops and <=8MB - the same
-# measured policy. Each (type,name,lang) key is still written exactly once.
 $ops = New-Object System.Collections.ArrayList
 foreach ($p in $planned) {
     [void]$ops.Add(@{ Type = 3; NameForm = $p.Entry.NameForm; NameIsInt = [bool]$p.Entry.NameIsInt; Lang = [uint16]$p.Entry.Lang; Data = $p.New; Op = "RT_ICON $($p.Entry.NameForm) lang $($p.Entry.Lang)" })
@@ -854,20 +764,15 @@ try {
     }
 }
 catch {
-    # a half-written payload must never look like a baked one: drop it and fail.
     if (Test-Path -LiteralPath $DestFull) { Remove-Item -LiteralPath $DestFull -Force -ErrorAction SilentlyContinue }
     throw
 }
 
-# ---- verify the write by reading the destination back ----
 $back = @{}
 $destIcons = @([ArcRecolor]::ReadIcons($DestFull))
 foreach ($e in $destIcons) { $back["$($e.NameForm)|$($e.Lang)"] = $e.Data }
 $bad = @()
 foreach ($p in $planned) {
-    # NB: never name this local $k - PowerShell variable names are
-    # case-insensitive, so $k IS the [double]$K parameter (measured: assignment
-    # of the string key threw "cannot convert '#1|1033' to System.Double").
     $key = "$($p.Entry.NameForm)|$($p.Entry.Lang)"
     if (-not $back.ContainsKey($key)) { $bad += "$key(absent)"; continue }
     if (-not [ArcRecolor]::BytesEqual($back[$key], $p.New)) { $bad += "$key(differs)"; continue }
@@ -879,9 +784,6 @@ foreach ($g in $groupPlans) {
     if (-not $backGroups.ContainsKey($key)) { $bad += "$key(group absent)"; continue }
     if (-not [ArcRecolor]::BytesEqual($backGroups[$key], $g.New)) { $bad += "$key(group differs)" }
 }
-# group/icon size invariant: every directory entry must declare the length of
-# the RT_ICON it names (this is what the theme sources hold, so the recolored
-# payload must hold it too - a PNG re-encode is exactly what can break it).
 $destLen = @{}
 foreach ($e in $destIcons) { $destLen["$($e.NameForm)|$($e.Lang)"] = $e.Data.Length }
 $sizeChecked = 0

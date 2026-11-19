@@ -1,11 +1,3 @@
-# SUPERSEDED: kept as the measured reference only.
-# The supported path is now %ProgramData%\ArcIcons\apply.ps1 / restore.ps1,
-# which perform this script's baseline-security step inline (no separate
-# finalizer step). See README.md. Do not extend this file.
-# Finalize-Security.ps1# Puts the ARC-installed live files and their surviving WinSxS siblings back on the exact
-# baseline owner/group/DACL recorded in originals\manifest.json.
-# Owner/group writes need SeRestorePrivilege ENABLED IN THIS PROCESS (a child process such as
-# icacls does not inherit it reliably), so this script enables it and calls SetFileSecurityW itself.
 param(
     [string]$Root = (Join-Path $env:ProgramData 'ArcIcons'),
     [string]$SystemResourceDir = (Join-Path $env:SystemRoot 'SystemResources'),
@@ -54,11 +46,9 @@ function Full($p) { (Get-Acl -LiteralPath $p).GetSecurityDescriptorSddlForm([Sys
 
 function Set-Baseline($p, $sddl) {
     [void][Fin]::SetFileSecurityW($p, [uint32]($OWNER -bor $GROUP), (Bin $sddl))
-    # try the plain DACL write first: it reproduces the baseline including the auto-inherited marker
     [void][Fin]::SetFileSecurityW($p, [uint32]$DACL, (Bin $sddl))
     $now = Full $p
     if ($now -ne $sddl) {
-        # fall back to an explicitly protected DACL write
         [void][Fin]::SetFileSecurityW($p, $PROTECTED, (Bin $sddl))
         $now = Full $p
     }
@@ -70,7 +60,6 @@ $targets = @()
 foreach ($f in $man.files) {
     $targets += [pscustomobject]@{ Label = "live $($f.name)"; Path = (Join-Path $SystemResourceDir $f.name); Sddl = $f.sddl }
 }
-# surviving WinSxS siblings of the ORIGINAL inodes (the live paths are fresh files now)
 $winsxs = Join-Path $env:SystemRoot 'WinSxS'
 foreach ($f in $man.files) {
     $hits = @(Get-ChildItem $winsxs -Recurse -Filter $f.name -File -ErrorAction SilentlyContinue |

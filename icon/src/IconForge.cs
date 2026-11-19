@@ -1,11 +1,3 @@
-// IconForge - original vector-ish art for ArcInstaller, drawn 100% by code (GDI+/System.Drawing).
-// No third-party assets, nothing downloaded. Compiles with .NET Framework 4.0 csc (C# 5 syntax only).
-//
-//   IconForge candidates <outDir>                 -> candidate-A/B/C.png (256px)
-//   IconForge build <outDir> A|B|C                -> ArcInstaller.ico + icon-256/32.png + icon-16-zoom8x.png
-//   IconForge enum <ico>                          -> list embedded entries
-//   IconForge extract <ico> <size> <out.png>      -> render a size BACK OUT of the .ico
-//   IconForge analyze <png>                       -> objective legibility metrics
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -19,7 +11,6 @@ namespace ArcInstaller.IconForge
 {
     internal static class Program
     {
-        // Palette ladder: dark greys only, #404040 .. #C0C0C0 (per brief).
         static Color C(int v) { return Color.FromArgb(255, v, v, v); }
         static Color CA(int a, int v) { return Color.FromArgb(a, v, v, v); }
 
@@ -99,7 +90,6 @@ namespace ArcInstaller.IconForge
             WriteIco(ico, entries);
             Console.WriteLine("wrote " + ico + " (" + entries.Count + " entries, " + new FileInfo(ico).Length + " bytes)");
 
-            // Render sizes BACK OUT of the finished .ico, then export them.
             foreach (int s in new int[] { 256, 32 })
             {
                 using (Bitmap b = ReadIcoEntry(ico, s))
@@ -159,8 +149,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // Text-source read of a rendered frame: a luminance ramp per pixel, so the small
-        // sizes are inspectable without a vision payload. Transparent = '.'.
         static void CmdAscii(string png)
         {
             using (Bitmap b = new Bitmap(png))
@@ -250,8 +238,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // Concept A: app tile carrying a 2x2 quadrant grid = the four theme variants,
-        // stepped along the grey ladder (lightest -> darkest, reading order).
         static void DrawGrid(Graphics g, float N, float s)
         {
             float inset = Math.Max(1.0f, 0.070f * N);
@@ -297,7 +283,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // Concept B: layered tile stack - resource payloads swapped in place.
         static void DrawLayers(Graphics g, float N, float s)
         {
             float inset = Math.Max(1.0f, 0.085f * N);
@@ -324,7 +309,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // Concept C: light app tile with a bold geometric "A" knocked out, arc sweep beneath.
         static void DrawArcA(Graphics g, float N, float s)
         {
             float inset = Math.Max(1.0f, 0.058f * N);
@@ -344,21 +328,18 @@ namespace ArcInstaller.IconForge
             float legT = 0.20f * boxW;
             Color ink = C(0x40);
 
-            // left leg
             PointF[] left = new PointF[] {
                 new PointF((bx + 0.50f * boxW) * s, by * s),
                 new PointF((bx + 0.50f * boxW - 0.16f * boxW) * s, by * s),
                 new PointF((bx + 0.06f * boxW) * s, (by + boxH) * s),
                 new PointF((bx + 0.06f * boxW + legT) * s, (by + boxH) * s)
             };
-            // right leg
             PointF[] right = new PointF[] {
                 new PointF((bx + 0.50f * boxW) * s, by * s),
                 new PointF((bx + 0.50f * boxW + 0.16f * boxW) * s, by * s),
                 new PointF((bx + 0.94f * boxW) * s, (by + boxH) * s),
                 new PointF((bx + 0.94f * boxW - legT) * s, (by + boxH) * s)
             };
-            // crossbar (spans the interior gap between the legs, clipped inside the legs)
             PointF[] bar = new PointF[] {
                 new PointF((bx + 0.395f * boxW) * s, (by + 0.615f * boxH) * s),
                 new PointF((bx + 0.605f * boxW) * s, (by + 0.615f * boxH) * s),
@@ -478,7 +459,6 @@ namespace ArcInstaller.IconForge
                 using (Image img = Image.FromStream(ms))
                     return new Bitmap(img);
             }
-            // 32bpp BGRA DIB payload
             int w = BitConverter.ToInt32(data, 4);
             int h = BitConverter.ToInt32(data, 8) / 2;
             Bitmap bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb);
@@ -503,8 +483,6 @@ namespace ArcInstaller.IconForge
         }
 
 
-        // Nearest-neighbour zoom of the 16px frame over white / mid / dark panels,
-        // so the tiny-size result is inspectable on every desktop shade.
         static void SaveZoom(Bitmap b16, string path, int zoom)
         {
             Color[] panels = new Color[] { Color.White, Color.FromArgb(255, 0x80, 0x80, 0x80), Color.FromArgb(255, 0x1E, 0x1E, 0x1E) };
