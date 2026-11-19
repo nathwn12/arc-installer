@@ -189,7 +189,6 @@ if ($Uninstall) {
   exit 0
 }
 
-# ---- default verb: register ----
 $RootC = Resolve-ArcIconsCanonicalPath $Root
 if (-not (Test-Path -LiteralPath $RootC -PathType Container)) {
   Fail-AutoRepair ("-Root not found: {0}." -f $RootC)

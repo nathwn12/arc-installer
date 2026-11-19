@@ -81,7 +81,6 @@ try {
     $instSrc = Get-Content -Raw -LiteralPath (Join-Path $src 'installed-manifest.json') | ConvertFrom-Json
     $mergedSha = [string](@($instSrc.files | Where-Object { $_.name -eq $name })[0].mergedSha256)
 
-    # ---- RootA: a root whose live zipfldr is a NEW OS build (bytes differ) ----
     $rootA = Join-Path $T 'rootA'
     New-RootCopy $src $rootA
     $origRowsBefore = @{}
@@ -195,7 +194,6 @@ try {
     Check (($r.Code -eq 0) -and ($r.Out -match 'DRY-RUN plan') -and ($r.Out -match 'zipfldr')) 'R11 apply -DryRun AFTER rebase+merge: plan exit 0 (flip)'
     Check ($r.Out -match [regex]::Escape($newMergedSha)) 'R11 the plan stages the RE-MERGED zipfldr hash, not stock'
 
-    # ---- RootB: pair-only merge keeps three rows, two untouched ----
     $rootB = Join-Path $T 'rootB'
     New-RootCopy $src $rootB
     $manB = Join-Path $rootB 'installed-manifest.json'
@@ -222,7 +220,6 @@ try {
     $r = Invoke-Proc $exe @('-NoProfile', '-File', $merge, '-Root', $rootB, '-Build', '-Pair', $name, '-Variant', 'dark-grey')
     Check (($r.Code -ne 0) -and ($r.Out -match 'stale')) 'R12 untouched row with a stale stage is REFUSED (throws)'
 
-    # ---- RootE: manifest paths are DATA (confinement) and lock precedes validation ----
     $rootE = Join-Path $T 'rootE'
     New-RootCopy $src $rootE
     $manE = Join-Path $rootE 'originals\manifest.json'

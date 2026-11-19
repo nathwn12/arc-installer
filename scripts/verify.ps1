@@ -65,7 +65,6 @@ public static extern bool FreeLibrary(IntPtr hModule);
 $failures = @()
 $notes = @()
 
-# ---- F6: manifest completeness first; empty/missing is FAIL, never PASS ----
 $origManPath = Join-Path $RootC 'originals\manifest.json'
 if (-not (Test-Path -LiteralPath $origManPath -PathType Leaf)) { Write-Output 'ARC-ICONS-VERIFY: FAIL originals\manifest.json not found.'; exit 1 }
 try { $origMan = Read-ArcIconsJsonFile $origManPath }
@@ -75,7 +74,6 @@ catch { Write-Output ("ARC-ICONS-VERIFY: FAIL manifest completeness: {0}" -f $_)
 $baseline = @{}
 foreach ($b in $origMan.files) { $baseline[[string]$b.name] = $b }
 
-# ---- F6: baseline rows must carry their own hash + path, in EVERY mode ----
 # A row without originalSha256 previously fell through to the INFO branch below
 # ("no single expected hash"), so a manifest that omitted the field could still
 # reach PASS. Missing is a named FAIL, never INFO.
@@ -95,7 +93,6 @@ foreach ($b in $origMan.files) {
   }
 }
 
-# ---- F6: mode enum ----
 $mode = 'original'
 $modeDeclared = $false
 $statePath = Join-Path $RootC 'state.json'

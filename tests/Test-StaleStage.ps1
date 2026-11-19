@@ -107,7 +107,6 @@ $T = Join-Path ([IO.Path]::GetTempPath()) ('arc-stale-test-' + ([guid]::NewGuid(
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 New-Item -ItemType Directory -Force -Path $T | Out-Null
 try {
-    # ---------- (a)+(b): stale stage refused, then re-merged and accepted ----------
     $rootAB = Join-Path $T 'rootAB'
     New-Root $src $rootAB @('Arc Dark Grey\Windhawk Resources')
     $liveAB = Join-Path $T 'liveAB'
@@ -152,7 +151,6 @@ try {
     Check ($r.Flat -match 'DRY-RUN plan') 'B4 the plan is printed'
     Check (-not ($r.Flat -match 'stale stage')) 'B5 the rebuilt stage is no longer called stale'
 
-    # ---------- (c): unknown live payload refuses the variant switch ----------
     $rootC = Join-Path $T 'rootC'
     New-Root $src $rootC @('Windhawk Resources', 'Arc Dark Grey\Windhawk Resources') -NoStage
     $liveC = Join-Path $T 'liveC'
@@ -177,7 +175,6 @@ try {
     Check ($beforeC -eq $afterC) 'C6 nothing was mutated (no merge, no restore, live untouched)'
     Check (-not (Test-Path -LiteralPath (Join-Path $rootC 'stage'))) 'C7 the switch never reached the merge step'
 
-    # ---------- (d): one confirmation, before any mutation ----------
     $rootD = Join-Path $T 'rootD'
     New-Root $src $rootD @('Windhawk Resources', 'Arc Dark Grey\Windhawk Resources')
     $liveD = Join-Path $T 'liveD'

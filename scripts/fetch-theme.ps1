@@ -109,7 +109,6 @@ foreach ($pack in $Packs) {
   Write-Host "extract  $($pack.Name) -> theme\$($pack.Dest)"
 }
 
-# --- Arc Dark Grey: derived locally, never downloaded -------------------------
 $greySrc  = Join-Path $ThemeDir 'Arc Neutral Grey\Windhawk Resources'
 $darkDir  = Join-Path $ThemeDir 'Arc Dark Grey\Windhawk Resources'
 if (-not (Test-Path -LiteralPath $greySrc -PathType Container)) { throw "missing $greySrc - the neutral grey pack did not extract" }
@@ -140,7 +139,6 @@ if ($LASTEXITCODE -ne 0) { throw "New-IconThemePreview.ps1 failed (exit $LASTEXI
 
 Copy-Item -LiteralPath (Join-Path $Root 'docs\arc-dark-grey-variant.md') -Destination (Join-Path $ThemeDir 'Arc Dark Grey\NOTES.md') -Force
 
-# --- fetch provenance: what was pinned, when ---------------------------------
 # theme\source.json records the fetch this tree came from so a later merge or
 # audit can re-check it. Overwritten on every fetch run (fetch-time fact, not
 # a versioned artifact).
@@ -159,7 +157,6 @@ $sourceJson = [ordered]@{
 $sourceJson | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ThemeDir 'source.json') -Encoding utf8
 Write-Host 'provenance theme\source.json'
 
-# --- report -------------------------------------------------------------------
 Write-Host ''
 Write-Host 'theme tree:'
 $expected = @(

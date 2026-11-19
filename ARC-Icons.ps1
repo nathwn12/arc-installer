@@ -411,7 +411,6 @@ function Invoke-Apply {
     # the operator. Nothing here mutates anything until the SINGLE confirmation
     # in the preflight below: the old flow merged+restored first and then asked
     # again, so declining left stock icons installed with no theme (t28).
-    # ---- preflight: nothing has been mutated yet ----
     $switching = ($built -ne $v.Display)
     $stale = Get-ArcIconsStageStaleness (Read-Json $InstMan) (Resolve-ArcIconsCanonicalPath $Root)
     $rebuild = [bool]$stale.Stale
@@ -818,7 +817,6 @@ function Show-Menu {
     }
 }
 
-# ---- entry ----
 # One exit code for the whole run: every action sets it (0 on success, non-zero
 # on a soft failure) and hard failures exit through Stop-Visible. The final
 # `exit` below must never invent an OK.

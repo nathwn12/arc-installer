@@ -189,7 +189,6 @@ function New-ExeFromZip {
 
 $failed = $false
 try {
-    # ---- (a) healthy built exe extracts, verifies, repairs -----------------
     $healthyRoot = Join-Path $work 'roots\healthy'
     $r = Invoke-Installer -ExePath $exe -Arguments @('--extract') -ToolRoot $healthyRoot
     Assert-True ($r.ExitCode -eq 0) "healthy --extract exit 0 (got $($r.ExitCode), stderr: $($r.StdErr))"
@@ -221,7 +220,6 @@ try {
     Assert-True ((@(Get-ChildItem -LiteralPath $healthyRoot -Recurse -File -Filter '*.arc-new').Count) -eq 0) 'no .arc-new temp file left behind'
     Write-Output "OK healthy: $verified/$($rows.Count) manifest rows match on disk"
 
-    # ---- (b) tampered payloads: non-zero exit, nothing written -------------
     $probeText = 'probe payload bytes'
     $probeHash = Get-TextSha256 $probeText
 
@@ -310,7 +308,6 @@ try {
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $work 'roots\escape.txt'))) 'escaping entry never lands outside the root'
     Write-Output 'OK traversal: ../escape.txt rejected by the containment guard'
 
-    # ---- (c) zip-bomb cap ---------------------------------------------------
     $bombExe = New-BombExe -Name 'bomb'
     $bombRoot = Join-Path $work 'roots\bomb'
     $r = Invoke-Installer -ExePath $bombExe -Arguments @('--extract') -ToolRoot $bombRoot
@@ -321,7 +318,6 @@ try {
     Assert-True ((Get-TreeFileCount $bombRoot) -eq 0) 'zip bomb writes no file'
     Write-Output 'OK bomb: 705 MiB declared payload rejected by the 704 MiB cap, nothing written'
 
-    # ---- (c2) a reparse-point tool root is refused before extraction --------
     $junctionRoot = Join-Path $work 'roots\junction-root'
     $junctionTarget = Join-Path $work 'roots\junction-target'
     New-Item -ItemType Directory -Force -Path $junctionTarget | Out-Null
@@ -337,7 +333,6 @@ try {
         Write-Output 'SKIP reparse: this host refused mklink /J (not a failure of the guard)'
     }
 
-    # ---- (c3) a hardlinked install target is refused ------------------------
     $hardRoot = Join-Path $work 'roots\hardlink'
     $r = Invoke-Installer -ExePath $exe -Arguments @('--extract') -ToolRoot $hardRoot
     Assert-True ($r.ExitCode -eq 0) "hardlink case: seed extraction exit 0 (got $($r.ExitCode))"
@@ -357,7 +352,6 @@ try {
         Write-Output 'SKIP hardlink: this host refused mklink /H (not a failure of the guard)'
     }
 
-    # ---- (d) selftest still green ------------------------------------------
     $r = Invoke-Installer -ExePath $exe -Arguments @('--selftest') -ToolRoot (Join-Path $work 'roots\selftest')
     Assert-True ($r.ExitCode -eq 0) "selftest exit 0 (got $($r.ExitCode), stdout: $($r.StdOut))"
     Assert-Match $r.StdOut 'manifest: \d+/\d+ files verified' 'selftest reports manifest verification'

@@ -164,7 +164,6 @@ function Get-ArcIconsStageStaleness($InstalledManifest, [string]$RootC) {
   return $res
 }
 
-# ---- F4 path confinement: canonicalize everything, no cross-root fallback ----
 $RootC = Resolve-ArcIconsCanonicalPath $Root
 $DefaultRootC = Resolve-ArcIconsCanonicalPath $DefaultRoot
 if (($RootC -ine $DefaultRootC) -and (-not $PSBoundParameters.ContainsKey('SystemResourceDir'))) {
@@ -175,7 +174,6 @@ if (-not (Test-Path -LiteralPath $SysC -PathType Container)) {
   Fail-Apply ("ARC-ICONS-APPLY: FAIL SystemResourceDir not found: {0}. No changes made." -f $SysC)
 }
 
-# ---- F2 unconditional preflight (-Force can NOT bypass any of this) ----
 $origManPath = Join-Path $RootC 'originals\manifest.json'
 $instManPath = Join-Path $RootC 'installed-manifest.json'
 $VariantInfo = Get-ArcIconsVariantInfo $Variant
@@ -246,7 +244,6 @@ try {
   Fail-Apply ("ARC-ICONS-APPLY: PREFLIGHT FAIL {0} (-Force cannot bypass; no changes made.)" -f $_)
 }
 
-# ---- live plan: ONLY the live-hash check is -Force-overridable ----
 $plan = @()
 $refusals = @()
 foreach ($f in $instMan.files) {
@@ -283,7 +280,6 @@ if ($DryRun) {
   exit 0
 }
 
-# ---- F1/F3/F5 mutate: journal before each change, lock, rollback on failure ----
 $logDir = Join-Path $RootC 'logs'
 if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 $lockHeld = $false

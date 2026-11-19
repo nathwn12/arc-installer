@@ -46,7 +46,6 @@ function Fail-Restore([string]$Msg) {
   exit 1
 }
 
-# ---- F4 path confinement: canonicalize everything, no cross-root fallback ----
 $RootC = Resolve-ArcIconsCanonicalPath $Root
 $DefaultRootC = Resolve-ArcIconsCanonicalPath $DefaultRoot
 if (($RootC -ine $DefaultRootC) -and (-not $PSBoundParameters.ContainsKey('SystemResourceDir'))) {
@@ -57,7 +56,6 @@ if (-not (Test-Path -LiteralPath $SysC -PathType Container)) {
   Fail-Restore ("ARC-ICONS-RESTORE: FAIL SystemResourceDir not found: {0}. No changes made." -f $SysC)
 }
 
-# ---- F2 unconditional preflight (-Force can NOT bypass any of this) ----
 $origManPath = Join-Path $RootC 'originals\manifest.json'
 try {
   if (-not (Test-Path -LiteralPath $origManPath -PathType Leaf)) { throw 'originals\manifest.json not found.' }
@@ -85,7 +83,6 @@ try {
   Fail-Restore ("ARC-ICONS-RESTORE: PREFLIGHT FAIL {0} (-Force cannot bypass; no changes made.)" -f $_)
 }
 
-# ---- plan: missing targets are CREATED (F3), any live hash is restored ----
 $plan = @()
 foreach ($b in $origMan.files) {
   $nm = [string]$b.name
@@ -116,7 +113,6 @@ if ($DryRun) {
   exit 0
 }
 
-# ---- F1/F3/F5 mutate: journal before each change, lock, rollback on failure ----
 $logDir = Join-Path $RootC 'logs'
 if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
 $lockHeld = $false

@@ -58,7 +58,6 @@ namespace ArcInstaller.IconForge
             return "usage: IconForge candidates <outDir> | build <outDir> <A|B|C> | enum <ico> | extract <ico> <size> <out.png> | analyze <png>";
         }
 
-        // ---------------------------------------------------------------- CLI
 
         static void CmdCandidates(string outDir)
         {
@@ -188,7 +187,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // ------------------------------------------------------------- drawing
 
         static Bitmap Render(int size, string variant)
         {
@@ -386,7 +384,6 @@ namespace ArcInstaller.IconForge
             }
         }
 
-        // ------------------------------------------------------------ ICO codec
 
         class IcoEntry
         {
@@ -505,7 +502,6 @@ namespace ArcInstaller.IconForge
             return bmp;
         }
 
-        // ------------------------------------------------------------- proofing
 
         // Nearest-neighbour zoom of the 16px frame over white / mid / dark panels,
         // so the tiny-size result is inspectable on every desktop shade.
