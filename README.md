@@ -130,12 +130,12 @@ powershell -NoProfile -File .\tests\Test-VariantParity.ps1
 
 ## Links
 
-- [Issues](https://github.com/nathwn12/arc-installer/issues) — report a break with the action you ran and what it printed.
-- [Releases](https://github.com/nathwn12/arc-installer/releases) — the portable `ArcInstaller.exe`.
-- [Repair manual](docs/REPAIR-MANUAL.md) — measured mechanism, every command, the recovery ladder, the risk list.
-- [Install map](docs/WHERE-IT-LIVES.md) — what lives under `%ProgramData%\ArcIcons`, and the files it changes.
-- [Arc Dark Grey derivation](docs/arc-dark-grey-variant.md) — one factor per icon group and the measured hashes.
-- [Upstream theme packs](https://github.com/niivu/resource-redirect-icon-themes) — niivu's ARC and Arc Neutral packs for Windhawk Resource Redirect.
+- [Issues](https://github.com/nathwn12/arc-installer/issues)
+- [Releases](https://github.com/nathwn12/arc-installer/releases)
+- [Repair manual](docs/REPAIR-MANUAL.md)
+- [Install map](docs/WHERE-IT-LIVES.md)
+- [Arc Dark Grey derivation](docs/arc-dark-grey-variant.md)
+- [Upstream theme packs](https://github.com/niivu/resource-redirect-icon-themes)
 - [MIT licence](LICENSE)
 
-Built by nathwn12
+<p align="center"><sub>Built by nathwn12</sub></p>
