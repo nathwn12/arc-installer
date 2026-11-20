@@ -5,13 +5,19 @@
 <p align="center"><strong>Install, remove, and repair the ARC icon theme on Windows 10 and 11.</strong></p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/variants-5-brightgreen" alt="5 variants" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/main.png" width="520" alt="The ArcInstaller main window as the shipped exe opens it." />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
-  <img src="https://img.shields.io/badge/variants-5-brightgreen" alt="5 variants" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+  <img src="docs/screenshots/variants.png" width="240" alt="The icon variants the installer can apply." />
+  <img src="docs/screenshots/menu.png" width="240" alt="The install, remove and repair actions." />
+  <img src="docs/screenshots/details.png" width="240" alt="The details panel showing the pinned payloads." />
 </p>
 
 ## Why ArcInstaller
