@@ -8,6 +8,21 @@
   <img src="docs/screenshots/main.png" width="520" alt="The ArcInstaller main window as the shipped exe opens it." />
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/variants-5-brightgreen" alt="5 variants" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
+</p>
+
+## Why ArcInstaller
+
+Installing the ARC icon theme on Windows means replacing protected files in the system resources directory. Doing that by hand is easy to get wrong, and a bad replace leaves the shell with broken icons.
+
+- **One portable exe.** No package manager, no installer framework, no runtime to fetch.
+- **Pinned payloads.** Four upstream packs are checked against SHA-256 before anything is merged.
+- **Safe by default.** Install, remove and repair keep a pristine copy. Repair refuses an unknown payload instead of overwriting it.
+- **Proof in the tool.** `--selftest` checks every extracted file against the embedded manifest, so a build is verified from its own bytes.
+
 ## Install
 
 Download `ArcInstaller.exe` from the [latest release](https://github.com/nathwn12/arc-installer/releases/latest) and run it. One portable exe; its manifest requires Administrator, so Windows asks once at launch.
@@ -122,3 +137,5 @@ powershell -NoProfile -File .\tests\Test-VariantParity.ps1
 - [Arc Dark Grey derivation](docs/arc-dark-grey-variant.md) — one factor per icon group and the measured hashes.
 - [Upstream theme packs](https://github.com/niivu/resource-redirect-icon-themes) — niivu's ARC and Arc Neutral packs for Windhawk Resource Redirect.
 - [MIT licence](LICENSE)
+
+Built by nathwn12
