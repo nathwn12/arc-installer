@@ -1,0 +1,13 @@
+---
+project: arc-installer
+one_line: Install, remove, and repair the ARC icon theme on Windows 10 and 11.
+stack: [PowerShell]
+status: draft
+since: 2026-10
+capabilities: []
+limits: []
+updated: 2026-11-22
+draft: true
+---
+
+Installing the ARC icon theme on Windows means replacing protected files in the system resources directory. Doing that by hand is easy to get wrong, and a bad replace leaves the shell with broken icons.
