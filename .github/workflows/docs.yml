@@ -1,0 +1,22 @@
+# Docs gate: copied from the sibling house workflow in report mode, not strict.
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '26'
+      - name: Docs gate (report mode)
+        run: node scripts/docs-check.mjs --report
