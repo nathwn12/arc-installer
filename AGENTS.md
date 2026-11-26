@@ -1,6 +1,6 @@
 # AGENTS.md
 
-ArcInstaller puts the ARC icon theme on Windows 10/11 x64 by replacing three merged payloads in the live SystemResources directory (`%SystemRoot%\SystemResources`; exact path and ACL mechanism in [docs/REPAIR-MANUAL.md](docs/REPAIR-MANUAL.md)), and puts the stock payloads back on revert. One self-contained WinForms exe (`src\ArcInstaller.cs`) wrapping a PowerShell payload. No package manager, project file, test suite or CI.
+ArcInstaller puts the ARC icon theme on Windows 10/11 x64 by replacing three merged payloads in the live SystemResources directory (`%SystemRoot%\SystemResources`; exact path and ACL mechanism in [docs/REPAIR-MANUAL.md](docs/REPAIR-MANUAL.md)), and puts the stock payloads back on revert. One self-contained WinForms exe (`src\ArcInstaller.cs`) wrapping a PowerShell payload. No package manager or project file; checks are the `tests\` PowerShell scripts and the workflows under `.github/workflows/`.
 
 ## Build
 
