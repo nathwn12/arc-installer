@@ -50,7 +50,7 @@ pwsh -NoProfile -File .\scripts\fetch-theme.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 ```
 
-`fetch-theme.ps1` downloads the four upstream packs, verifies every archive against a pinned SHA-256, and derives Arc Dark Grey locally. `build.ps1` stages the payload and compiles `dist\ArcInstaller.exe` — the same commands with `dist\` in front. To pin an exact version, add `git checkout v0.2.2` before fetching.
+`fetch-theme.ps1` downloads the four upstream packs, verifies every archive against a pinned SHA-256, and derives Arc Dark Grey locally. `build.ps1` stages the payload and compiles `dist\ArcInstaller.exe` — the same commands with `dist\` in front. To pin an exact release, check out that release's tag before fetching; the released versions and their dates are the headings in [CHANGELOG.md](CHANGELOG.md).
 
 ## Use it
 
