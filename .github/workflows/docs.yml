@@ -1,4 +1,4 @@
-# Docs gate: copied from the sibling house workflow in report mode, not strict.
+# Docs gate: strict phase-2 enforcement for this repository.
 name: docs
 
 on:
@@ -18,5 +18,5 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
-      - name: Docs gate (report mode)
-        run: node scripts/docs-check.mjs --report
+      - name: Docs gate (strict mode)
+        run: node scripts/docs-check.mjs --strict
