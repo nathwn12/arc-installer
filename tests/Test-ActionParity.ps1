@@ -20,7 +20,7 @@ $gui = Read-Text 'src\ArcInstaller.cs'
 $manual = Read-Text 'docs\REPAIR-MANUAL.md'
 $lives = Read-Text 'docs\WHERE-IT-LIVES.md'
 $shared = Read-Text 'bin\Set-BaselineSecurity.ps1'
-$worker = Read-Text 'bin\Refresh-UserIconCache.ps1'
+$worker = Read-Text 'bin\ArcIcons-UserRefresh.ps1'
 
 $vs = [regex]::Match($controller, "\[ValidateSet\(([^\)]*)\)\]")
 if (-not $vs.Success) { throw 'ARC-Icons.ps1: no [ValidateSet(...)] on -Action' }
@@ -44,8 +44,8 @@ $removeHandler = [regex]::Match($gui, 'private void OnRemoveTheme\([^)]*\)\s*\{.
 if (-not $removeHandler.Success) { throw 'src\ArcInstaller.cs: no OnRemoveTheme handler' }
 Assert-Contains $removeHandler.Value 'RunAction("uninstall")' 'OnRemoveTheme triggers the uninstall action'
 
-Assert-Contains $controller 'INSTALL   (full:' 'menu names full install'
-Assert-Contains $controller 'UNINSTALL (full:' 'menu names full uninstall'
+Assert-Contains $controller 'INSTALL - full install (' 'menu names full install'
+Assert-Contains $controller 'UNINSTALL - full uninstall (' 'menu names full uninstall'
 
 foreach ($doc in @(@{ N = 'docs\REPAIR-MANUAL.md'; T = $manual }, @{ N = 'docs\WHERE-IT-LIVES.md'; T = $lives })) {
   Assert-Contains $doc.T '-Action install' ("{0} documents -Action install" -f $doc.N)
