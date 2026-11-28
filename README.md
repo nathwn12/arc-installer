@@ -5,7 +5,7 @@
 <p align="center"><strong>Install, remove, and repair the ARC icon theme on Windows 10 and 11.</strong></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-windows--64bit-2b3137?logo=windows&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/platform-Windows--64bit-2b3137?logo=Windows&logoColor=white" alt="Platform" />
   <img src="https://img.shields.io/badge/variants-5-brightgreen" alt="5 variants" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="MIT" /></a>
 </p>

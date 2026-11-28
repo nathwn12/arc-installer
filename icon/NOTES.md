@@ -29,7 +29,7 @@ and the PNG renders are the same design at every size: the SVG geometry mirrors
 ### The three candidates (drawn at 256px, in `candidates/`)
 
 | Candidate | Idea | 16px read (ASCII-ramp probe) | Verdict |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **A** — variant grid | app tile + 2×2 grey ladder | four distinct swatches survive, dark separators intact | **chosen** |
 | B — layered stack | three offset tiles = payloads swapped in place | collapses to a single blob; the 3 layer offsets blur into one square | rejected: fails at 16px |
 | C — Arc "A" | light tile, knockout geometric **A**, arc sweep | the A *does* survive at 16px; strongest brand read | runner-up: says "Arc" but not "four variants / theme tool" |
@@ -43,7 +43,7 @@ column views.
 Strictly the briefed dark-grey band, plus black at low alpha for the drop shadow:
 
 | Role | Value |
-|---|---|
+| --- | --- |
 | tile plate (gradient) | `#4E4E4E` → `#404040` |
 | plate rim (≥24px only) | `#A0A0A0` @ alpha 130 |
 | swatch ladder | `#C0C0C0`, `#A8A8A8`, `#909090`, `#707070` |
@@ -84,7 +84,7 @@ pwsh -NoProfile -File .\build.ps1 -Variant A
 7 entries, in order (verified by `IconForge enum` — a direct header parse, not a claim):
 
 | # | size | format | payload bytes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | 0 | 16×16 | 32bpp BGRA DIB | 1128 |
 | 1 | 24×24 | 32bpp BGRA DIB | 2440 |
 | 2 | 32×32 | 32bpp BGRA DIB | 4264 |
@@ -118,7 +118,7 @@ Total file: 54881 bytes.
 
 ### sha256 manifest
 
-```
+```text
 2f1833d8b64193754a30e4959ce48835da723247dd93c283a0093a8aaeccea9e2  ArcInstaller.ico
 28eb6eaa9109a955726f076f4ef1f25a105bc425125672228efb108a6b058995  icon-256.png
 ff2750a543fdbe34663c0d908d5e65a13f72ae37dfa05b37387d68a5f31c78e6  icon-32.png

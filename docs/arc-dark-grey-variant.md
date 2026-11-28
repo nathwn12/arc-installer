@@ -54,7 +54,7 @@ this variant must not do. Measured on the Neutral Grey payload:
 
 So each `RT_GROUP_ICON` gets its own effective factor:
 
-```
+```text
 kEff = min(1, max(K, Floor / groupMeanLuminance))
 ```
 
@@ -77,7 +77,7 @@ dark.
 **How many groups the floor touched** (out of 217): 136 groups were clamped
 (multiplied less than 0.55) and 8 were held at `kEff = 1` because they were
 already at or below the floor (the red document family around #482-#489 and
-#1050-#1063). 0 entries are outside any group.
+`#1050-#1063`). 0 entries are outside any group.
 
 ## The neutral-axis guard (fail closed)
 
